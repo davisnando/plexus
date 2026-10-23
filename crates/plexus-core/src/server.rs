@@ -292,8 +292,10 @@ impl HubServer {
             } else {
                 "ok"
             };
+            // Clients often join text blocks without a separator.
+            let gap = if i == 0 { "" } else { "\n\n" };
             content.push(ContentBlock::text(format!(
-                "## [{}] {} ({status})",
+                "{gap}## [{}] {} ({status})\n",
                 i + 1,
                 p.name
             )));

@@ -1168,10 +1168,9 @@ impl Hub {
         };
         upstream.inflight.fetch_add(1, Ordering::Relaxed);
         let _guard = InflightGuard(upstream);
-        let mut params = CallToolRequestParams::new(target.tool.name.to_string());
-        if let Some(args) = arguments {
-            params = params.with_arguments(args);
-        }
+        // Always send an object: many servers reject a call with no `arguments`.
+        let params = CallToolRequestParams::new(target.tool.name.to_string())
+            .with_arguments(arguments.unwrap_or_default());
         match peer.call_tool(params).await {
             Ok(result) => {
                 let status = if result.is_error == Some(true) {
