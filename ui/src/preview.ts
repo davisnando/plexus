@@ -44,7 +44,7 @@ mockIPC(
       case 'profile_token': return 'pXq8w2mZ0rTn4vKs9LbY1cJd6fHa3uEo';
       case 'profile_tools': return tools.map((t, i) => ({ connection_id: 'c1', connection_alias: 'jira_acme', connection_name: 'Jira Acme', tool: t.name, exposed_name: t.exposed_name, description: t.description, policy: i === 5 ? 'approval' : i === 4 ? 'hidden' : 'allow' }));
       case 'get_settings': return { port: 7420, default_idle_timeout_secs: 600, log_retention_days: 7, approval_timeout_secs: 60 };
-      case 'get_approval': return { id: args.id, profile_name: 'Work', connection_name: 'Jira Acme', connection_alias: 'jira_acme', tool: 'delete_issue', arguments: { issue_key: 'ACME-1432', delete_subtasks: true } };
+      case 'get_approval': return { id: args.id, profile_name: 'Work', connection_name: 'Jira Acme', connection_alias: 'jira_acme', tool: 'delete_issue', arguments: { issue_key: 'ACME-1432', delete_subtasks: true }, reason: 'Removing the duplicate of ACME-1201 you asked me to clean up.' };
       case 'plugin:autostart|is_enabled': return true;
       default: return null;
     }

@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, RwLock, Weak,
-        atomic::{AtomicI64, AtomicUsize, Ordering},
+        atomic::{AtomicI64, AtomicU16, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -62,6 +62,8 @@ pub struct ApprovalRequest {
     pub connection_alias: String,
     pub tool: String,
     pub arguments: serde_json::Value,
+    /// Why the agent says it wants to make this call, if it gave a reason.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -76,6 +78,26 @@ pub enum ApprovalDecision {
 /// shell with a popup window; the hub applies the timeout.
 pub trait ApprovalBroker: Send + Sync {
     fn request(&self, req: ApprovalRequest) -> BoxFuture<'static, ApprovalDecision>;
+}
+
+/// Opens a URL in the user's browser; returns whether that worked.
+pub type UrlOpener = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// What [`Hub::reconnect`] did.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ReconnectOutcome {
+    Connected {
+        tool_count: usize,
+    },
+    /// A browser sign-in was started; the user has to finish it.
+    SignInStarted {
+        url: String,
+        opened: bool,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 /// An upstream tool as exposed through a profile.
@@ -102,6 +124,9 @@ struct Inner {
     /// slug -> (profile id, token)
     tokens: RwLock<HashMap<String, (String, String)>>,
     approval: RwLock<Option<Arc<dyn ApprovalBroker>>>,
+    url_opener: RwLock<Option<UrlOpener>>,
+    /// Port the MCP endpoint is bound to (0 until `http::serve` runs).
+    server_port: AtomicU16,
     legacy_peers: Mutex<Vec<(String, Peer<RoleServer>)>>,
     shell_path: Option<String>,
     oauth: crate::oauth::PendingFlows,
@@ -229,6 +254,8 @@ impl Hub {
             upstreams: Mutex::new(HashMap::new()),
             tokens: RwLock::new(tokens),
             approval: RwLock::new(None),
+            url_opener: RwLock::new(None),
+            server_port: AtomicU16::new(0),
             legacy_peers: Mutex::new(Vec::new()),
             shell_path,
             oauth: Default::default(),
@@ -326,6 +353,19 @@ impl Hub {
 
     pub fn set_approval_broker(&self, broker: Arc<dyn ApprovalBroker>) {
         *self.0.approval.write().unwrap() = Some(broker);
+    }
+
+    pub fn set_url_opener(&self, opener: UrlOpener) {
+        *self.0.url_opener.write().unwrap() = Some(opener);
+    }
+
+    fn open_url(&self, url: &str) -> bool {
+        let opener = self.0.url_opener.read().unwrap().clone();
+        opener.is_some_and(|open| open(url))
+    }
+
+    pub(crate) fn set_server_port(&self, port: u16) {
+        self.0.server_port.store(port, Ordering::Relaxed);
     }
 
     // ---- settings ----
@@ -449,9 +489,7 @@ impl Hub {
             }
         }
         self.0.store.update_connection(&connection)?;
-        if old.transport != connection.transport
-            || !input.secrets.is_empty()
-            || !connection.enabled
+        if old.transport != connection.transport || !input.secrets.is_empty() || !connection.enabled
         {
             self.stop_upstream(id).await;
         }
@@ -517,6 +555,78 @@ impl Hub {
         self.stop_upstream(id).await;
         self.refresh_capabilities(id).await?;
         Ok(self.tools(id).len())
+    }
+
+    /// Get a connection working again on behalf of an agent: restart it, and
+    /// if the server wants a sign-in, start the browser OAuth flow.
+    pub async fn reconnect(&self, id: &str) -> Result<ReconnectOutcome> {
+        let connection = self.connection(id)?;
+        if !connection.enabled {
+            return Ok(ReconnectOutcome::Failed {
+                message: format!(
+                    "`{}` is disabled; the user can enable it in Plexus.",
+                    connection.alias
+                ),
+            });
+        }
+        if self.status(id) != ConnectionStatus::NeedsAuth {
+            match self.test_connection(id).await {
+                Ok(tool_count) => return Ok(ReconnectOutcome::Connected { tool_count }),
+                Err(e) if self.status(id) != ConnectionStatus::NeedsAuth => {
+                    return Ok(ReconnectOutcome::Failed {
+                        message: format!("{e:#}"),
+                    });
+                }
+                Err(_) => {}
+            }
+        }
+        let Transport::Http { auth, .. } = &connection.transport else {
+            return Ok(ReconnectOutcome::Failed {
+                message:
+                    "the server rejected its credentials; the user has to update them in Plexus."
+                        .into(),
+            });
+        };
+        match auth {
+            HttpAuth::Oauth => {}
+            // A remote answering 401 without auth configured: switch it to OAuth,
+            // as the dashboard's "Sign in" button does.
+            HttpAuth::None => {
+                let mut transport = connection.transport.clone();
+                if let Transport::Http { auth, .. } = &mut transport {
+                    *auth = HttpAuth::Oauth;
+                }
+                self.update_connection(
+                    id,
+                    ConnectionInput {
+                        alias: connection.alias.clone(),
+                        name: connection.name.clone(),
+                        template_id: connection.template_id.clone(),
+                        transport,
+                        enabled: true,
+                        idle_timeout_secs: Some(connection.idle_timeout_secs),
+                        secrets: Default::default(),
+                    },
+                )
+                .await?;
+            }
+            HttpAuth::Bearer => {
+                return Ok(ReconnectOutcome::Failed {
+                    message:
+                        "the server rejected the bearer token; the user has to update it in Plexus."
+                            .into(),
+                });
+            }
+        }
+        let port = self.0.server_port.load(Ordering::Relaxed);
+        if port == 0 {
+            bail!("the Plexus server is not running");
+        }
+        let url = self
+            .start_oauth(id, &format!("http://127.0.0.1:{port}/oauth/callback"))
+            .await?;
+        let opened = self.open_url(&url);
+        Ok(ReconnectOutcome::SignInStarted { url, opened })
     }
 
     // ---- upstream lifecycle ----
@@ -635,8 +745,10 @@ impl Hub {
                 secret_headers,
             } => {
                 let mut config = StreamableHttpClientTransportConfig::with_uri(url.as_str());
-                let mut all_headers: Vec<(String, String)> =
-                    headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                let mut all_headers: Vec<(String, String)> = headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
                 for name in secret_headers {
                     let value = self
                         .secret(&connection.id, &format!("header:{name}"))?
@@ -777,7 +889,9 @@ impl Hub {
         };
         self.0.store.upsert_profile(&profile)?;
         let token = generate_token();
-        self.0.secrets.set(&profile_token_key(&profile.id), &token)?;
+        self.0
+            .secrets
+            .set(&profile_token_key(&profile.id), &token)?;
         self.0
             .tokens
             .write()
@@ -899,10 +1013,9 @@ impl Hub {
                 })
                 .collect()
         };
-        let results = futures::future::join_all(
-            pending.iter().map(|c| self.refresh_capabilities(&c.id)),
-        )
-        .await;
+        let results =
+            futures::future::join_all(pending.iter().map(|c| self.refresh_capabilities(&c.id)))
+                .await;
         for (c, r) in pending.iter().zip(results) {
             if let Err(e) = r {
                 tracing::warn!(connection = %c.alias, "discovery failed: {e:#}");
@@ -982,6 +1095,7 @@ impl Hub {
         profile: &Profile,
         exposed_name: &str,
         arguments: Option<JsonObject>,
+        reason: Option<String>,
     ) -> CallToolResult {
         let Some(target) = self
             .exposed_tools(profile)
@@ -991,7 +1105,9 @@ impl Hub {
             return error_result(format!("Unknown tool `{exposed_name}`"));
         };
         let started = Instant::now();
-        let (status, result) = self.call_resolved(profile, &target, arguments).await;
+        let (status, result) = self
+            .call_resolved(profile, &target, arguments, reason)
+            .await;
         let error = match (&status, &result) {
             (CallStatus::Ok, _) => None,
             (_, r) => Some(result_text(r)),
@@ -1021,9 +1137,13 @@ impl Hub {
         profile: &Profile,
         target: &ExposedTool,
         arguments: Option<JsonObject>,
+        reason: Option<String>,
     ) -> (CallStatus, CallToolResult) {
         if target.policy == ToolPolicy::Approval {
-            match self.request_approval(profile, target, &arguments).await {
+            match self
+                .request_approval(profile, target, &arguments, reason)
+                .await
+            {
                 Ok(()) => {}
                 Err(status) => {
                     let msg = match status {
@@ -1073,6 +1193,7 @@ impl Hub {
         profile: &Profile,
         target: &ExposedTool,
         arguments: &Option<JsonObject>,
+        reason: Option<String>,
     ) -> std::result::Result<(), CallStatus> {
         let Some(broker) = self.0.approval.read().unwrap().clone() else {
             return Err(CallStatus::Denied);
@@ -1091,6 +1212,7 @@ impl Hub {
                 .clone()
                 .map(serde_json::Value::Object)
                 .unwrap_or(serde_json::Value::Null),
+            reason: reason.filter(|r| !r.trim().is_empty()),
         };
         match tokio::time::timeout(Duration::from_secs(timeout), broker.request(request)).await {
             Ok(ApprovalDecision::AllowOnce) => Ok(()),

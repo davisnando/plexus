@@ -110,10 +110,24 @@ If the name exceeds 64 chars: `{alias}__{tool[..n]}_{hash6}`. A reverse map
 resolves calls. Descriptions get a `[{connection name}]` prefix so the LLM can
 tell `jira_acme` from `jira_client2`.
 
-**Meta mode.** Exposes exactly four tools:
-`list_connections`, `search_tools(query, connection?, limit=10)`,
-`describe_tool(name)` (returns input schema), `call_tool(name, arguments)`.
+**Meta mode.** Exposes six tools:
+`list_connections`, `search_tools(query, connection?, limit=10, include_schema?)`,
+`describe_tool(name | names)` (returns input schemas),
+`call_tool(name, arguments, connections?, fields?, max_chars?, reason?)`,
+`call_tools(calls[], max_chars?, reason?)` and `connect(alias)`.
 Search is BM25 over tokenized alias + connection name + tool name + description.
+
+- *Fan-out*: `connections` is a list of aliases or `"*"`, and `name` may be the bare upstream
+  tool name. `"*"` picks every connection with the same `template_id` as the named tool.
+  The calls run concurrently, and each result comes back under a `## [n] name (status)` header.
+- *Batch*: `call_tools` runs independent calls concurrently, at most 20 including fan-out.
+- *Shaping* (`shape.rs`): `fields` are dotted paths with `[]` for arrays (`issues[].key`),
+  applied to JSON text blocks. `max_chars` (default 50 000, 0 = off) is shared across results.
+  When text is cut, a note says so.
+- *Reason*: passed through to the approval popup.
+- *connect*: restarts the upstream. On `needs_auth` it starts the OAuth flow, switching
+  `auth: none` remotes to OAuth as the dashboard does, and opens the browser through the shell's
+  URL opener. The URL is returned as well.
 
 **Resources** (both modes): URIs rewritten to `plexus://{alias}/{urlencoded original}`;
 `resources/read` reverses it.

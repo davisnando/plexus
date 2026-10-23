@@ -15,13 +15,17 @@ Cursor      ──► http://127.0.0.1:7420/mcp/side ──► linear · sentry_
   (e.g. `jira_acme__create_issue`).
 - **Profiles.** Each profile has its own endpoint and bearer token, a routing matrix that picks its connections, and
   per-tool policies (allow / ask / hide).
-- **Two tool modes.** *Every tool* re-exports all tools directly. *Search & call* exposes four meta tools
-  (`list_connections`, `search_tools`, `describe_tool`, `call_tool`) with BM25 search, which keeps the client's context
-  small when many servers are connected.
+- **Two tool modes.** *Every tool* re-exports all tools directly. *Search & call* exposes six meta tools
+  (`list_connections`, `search_tools`, `describe_tool`, `call_tool`, `call_tools`, `connect`) with BM25 search, which
+  keeps the client's context small when many servers are connected. Calls can fan out over several instances
+  (`connections: "*"` runs one tool on every Jira), run in parallel batches, keep only selected JSON `fields`, and are
+  capped at `max_chars`. Agents can pass a `reason` that the approval prompt shows, and `connect` restarts a failing
+  connection or opens the browser sign-in.
 - **Upstream types.** Local stdio (npx, uvx, docker, any binary), remote HTTP with static headers or a bearer token, and
   remote HTTP with OAuth: discovery, dynamic client registration and PKCE in your browser, with separate tokens per
   connection.
-- **Catalog.** Curated templates (Jira/Confluence, Atlassian, Sentry, GitHub, Linear, Notion, Filesystem), search of
+- **Catalog.** Curated templates (Jira/Confluence, Atlassian, Sentry, GitHub, GitLab, Linear, Notion, Slack, Postgres,
+  Supabase, Stripe, Honeycomb, Grafana, Cloudflare, Context7, Playwright, Fetch, Filesystem), search of
   the official MCP Registry, or any custom command or URL.
 - **Secrets** live in the macOS Keychain. Config lives in SQLite at `~/Library/Application Support/dev.plexus.app/`.
 - **Lazy processes.** Upstreams start on first use, their tool lists are cached, and they stop after an idle timeout.

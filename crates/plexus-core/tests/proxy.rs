@@ -30,7 +30,10 @@ fn fake(env: &[(&str, &str)], secret_env: &[&str]) -> Transport {
     Transport::Stdio {
         command: env!("CARGO_BIN_EXE_fake-mcp").into(),
         args: vec![],
-        env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        env: env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
         secret_env: secret_env.iter().map(|s| s.to_string()).collect(),
     }
 }
@@ -125,7 +128,12 @@ async fn aggregates_two_instances_of_the_same_server() {
     names.sort();
     assert_eq!(
         names,
-        ["fake_alpha__echo", "fake_alpha__whoami", "fake_bravo__echo", "fake_bravo__whoami"]
+        [
+            "fake_alpha__echo",
+            "fake_alpha__whoami",
+            "fake_bravo__echo",
+            "fake_bravo__whoami"
+        ]
     );
     let r = c
         .call_tool(CallToolRequestParams::new("fake_bravo__whoami"))
@@ -174,14 +182,18 @@ async fn aggregates_two_instances_of_the_same_server() {
         .unwrap();
     assert_eq!(r.is_error, Some(true));
 
-    // Meta mode: four tools, search + call through.
+    // Meta mode: six tools, search + call through.
     let m = client(port, "meta", &hub.profile_token(&meta.id).unwrap()).await;
     let meta_tools = m.list_all_tools().await.unwrap();
-    assert_eq!(meta_tools.len(), 4);
+    assert_eq!(meta_tools.len(), 6);
     let r = m
         .call_tool(
-            CallToolRequestParams::new("search_tools")
-                .with_arguments(json!({"query": "account name"}).as_object().unwrap().clone()),
+            CallToolRequestParams::new("search_tools").with_arguments(
+                json!({"query": "account name"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
         )
         .await
         .unwrap();
@@ -205,6 +217,174 @@ async fn aggregates_two_instances_of_the_same_server() {
     assert_eq!(calls[1].status, CallStatus::Denied);
 
     c.cancel().await.unwrap();
+    m.cancel().await.unwrap();
+    hub.stop_all().await;
+    server.shutdown().await;
+}
+
+/// Records approval requests and allows them.
+#[derive(Default)]
+struct Record(std::sync::Mutex<Vec<ApprovalRequest>>);
+impl ApprovalBroker for Record {
+    fn request(&self, req: ApprovalRequest) -> BoxFuture<'static, ApprovalDecision> {
+        self.0.lock().unwrap().push(req);
+        Box::pin(async { ApprovalDecision::AllowOnce })
+    }
+}
+
+fn args(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    v.as_object().unwrap().clone()
+}
+
+fn all_text(r: &CallToolResult) -> String {
+    r.content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn meta_mode_batches_fans_out_and_shapes_results() {
+    let hub = hub().await;
+    let mut ids = vec![];
+    for name in ["alpha", "bravo", "charlie"] {
+        let c = hub
+            .create_connection(ConnectionInput {
+                alias: format!("fake_{name}"),
+                name: format!("Fake {name}"),
+                template_id: Some("fake".into()),
+                transport: fake(&[("FAKE_NAME", name)], &[]),
+                enabled: true,
+                idle_timeout_secs: None,
+                secrets: BTreeMap::new(),
+            })
+            .await
+            .unwrap();
+        ids.push(c.id);
+    }
+    let meta = hub
+        .create_profile(ProfileInput {
+            slug: "meta".into(),
+            name: "Meta".into(),
+            mode: ProfileMode::Meta,
+            connection_ids: ids.clone(),
+        })
+        .unwrap();
+    let server = plexus_core::http::serve(hub.clone(), 0).await.unwrap();
+    let m = client(
+        server.addr.port(),
+        "meta",
+        &hub.profile_token(&meta.id).unwrap(),
+    )
+    .await;
+    let call = |name: &str, a: serde_json::Value| {
+        m.call_tool(CallToolRequestParams::new(name.to_string()).with_arguments(args(a)))
+    };
+
+    // Search can return schemas inline; describe takes several names.
+    let r = call(
+        "search_tools",
+        json!({"query": "echo", "include_schema": true}),
+    )
+    .await
+    .unwrap();
+    assert!(text(&r).contains("input_schema"));
+    let r = call(
+        "describe_tool",
+        json!({"names": ["fake_alpha__echo", "nope"]}),
+    )
+    .await
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text(&r)).unwrap();
+    assert_eq!(v["tools"][0]["name"], "fake_alpha__echo");
+    assert_eq!(v["unknown"], json!(["nope"]));
+
+    // Fan-out: one tool on every connection of the same kind.
+    let r = call(
+        "call_tool",
+        json!({"name": "fake_alpha__whoami", "connections": "*"}),
+    )
+    .await
+    .unwrap();
+    let out = all_text(&r);
+    for name in ["alpha", "bravo", "charlie"] {
+        assert!(out.contains(&format!("fake_{name}__whoami (ok)")), "{out}");
+        assert!(out.contains(name));
+    }
+    let r = call(
+        "call_tool",
+        json!({"name": "whoami", "connections": ["fake_bravo"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text(&r), "bravo");
+    let r = call(
+        "call_tool",
+        json!({"name": "whoami", "connections": ["fake_zulu"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.is_error, Some(true));
+
+    // Batch: independent calls, results in order.
+    let r = call(
+        "call_tools",
+        json!({"calls": [
+            {"name": "fake_alpha__echo", "arguments": {"text": "one"}},
+            {"name": "fake_charlie__whoami"}
+        ]}),
+    )
+    .await
+    .unwrap();
+    let out = all_text(&r);
+    assert!(
+        out.find("one").unwrap() < out.find("charlie").unwrap(),
+        "{out}"
+    );
+
+    // Shaping: keep selected JSON fields, cap the size.
+    let payload = json!({"items": [{"id": 1, "body": "x"}, {"id": 2, "body": "y"}]}).to_string();
+    let r = call(
+        "call_tool",
+        json!({"name": "fake_alpha__echo", "arguments": {"text": payload}, "fields": ["items[].id"]}),
+    )
+    .await
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text(&r)).unwrap();
+    assert_eq!(v, json!({"items": [{"id": 1}, {"id": 2}]}));
+    let r = call(
+        "call_tool",
+        json!({"name": "fake_alpha__echo", "arguments": {"text": "z".repeat(500)}, "max_chars": 100}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text(&r).len(), 100);
+    assert!(all_text(&r).contains("truncated"));
+
+    // The reason reaches the approval prompt.
+    let broker = Arc::new(Record::default());
+    hub.set_approval_broker(broker.clone());
+    hub.set_tool_policy(&meta.id, &ids[0], "whoami", ToolPolicy::Approval)
+        .unwrap();
+    let r = call(
+        "call_tool",
+        json!({"name": "fake_alpha__whoami", "reason": "checking the account"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text(&r), "alpha");
+    assert_eq!(
+        broker.0.lock().unwrap()[0].reason.as_deref(),
+        Some("checking the account")
+    );
+
+    // connect restarts a stdio connection and reports its tools.
+    let r = call("connect", json!({"alias": "fake_bravo"}))
+        .await
+        .unwrap();
+    assert!(text(&r).contains("2 tools"), "{}", text(&r));
+
     m.cancel().await.unwrap();
     hub.stop_all().await;
     server.shutdown().await;

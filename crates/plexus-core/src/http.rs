@@ -60,6 +60,7 @@ pub async fn serve(hub: Hub, port: u16) -> Result<HttpServer> {
         .await
         .with_context(|| format!("could not bind 127.0.0.1:{port}"))?;
     let addr = listener.local_addr()?;
+    hub.set_server_port(addr.port());
     let ct = CancellationToken::new();
     let state = AppState {
         hub: hub.clone(),

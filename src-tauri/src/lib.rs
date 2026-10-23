@@ -103,6 +103,12 @@ pub fn run() {
             }))?;
             let approvals = Approvals::new(app.handle().clone());
             hub.set_approval_broker(Arc::new(approvals.clone()));
+            // Lets agents start a browser sign-in through the `connect` meta tool.
+            let handle = app.handle().clone();
+            hub.set_url_opener(Arc::new(move |url: &str| {
+                use tauri_plugin_opener::OpenerExt;
+                handle.opener().open_url(url, None::<&str>).is_ok()
+            }));
             let port = hub.settings()?.port;
             app.manage(AppState {
                 hub: hub.clone(),

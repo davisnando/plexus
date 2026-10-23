@@ -114,6 +114,7 @@ export interface ApprovalRequest {
   connection_alias: string;
   tool: string;
   arguments: unknown;
+  reason: string | null;
 }
 
 export type ClientKind = 'claude-code' | 'claude-desktop' | 'cursor' | 'vscode';

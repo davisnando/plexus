@@ -40,6 +40,9 @@
         </p>
         <p class="mt-0.5 text-[12px] text-muted">on {req.connection_name}</p>
       </div>
+      {#if req.reason}
+        <p class="selectable border-l-2 border-violet pl-3 text-[13px] leading-snug">{req.reason}</p>
+      {/if}
       <pre
         class="selectable min-h-0 flex-1 overflow-auto rounded-lg border border-grid bg-paper px-3 py-2.5 font-mono text-[11.5px] leading-relaxed">{args}</pre>
       <div class="flex items-center gap-2">
