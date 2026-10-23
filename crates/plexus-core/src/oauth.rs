@@ -133,7 +133,9 @@ impl Hub {
     }
 
     /// Finish a sign-in from the redirect; returns the connection name.
-    pub async fn finish_oauth(&self, code: &str, csrf: &str) -> Result<String> {
+    /// `issuer` is the RFC 9207 `iss` parameter, required by servers that
+    /// advertise it (e.g. Sentry).
+    pub async fn finish_oauth(&self, code: &str, csrf: &str, issuer: Option<&str>) -> Result<String> {
         let (connection_id, mut state) = self
             .oauth_flows()
             .0
@@ -142,7 +144,7 @@ impl Hub {
             .remove(csrf)
             .ok_or_else(|| anyhow!("this sign-in link expired; start again from Plexus"))?;
         state
-            .handle_callback(code, csrf)
+            .handle_callback_with_issuer(code, csrf, issuer)
             .await
             .context("token exchange failed")?;
         // Tokens are persisted by the credential store during the exchange.
@@ -169,6 +171,7 @@ impl Hub {
 pub struct CallbackParams {
     code: Option<String>,
     state: Option<String>,
+    iss: Option<String>,
     error: Option<String>,
     error_description: Option<String>,
 }
@@ -178,7 +181,7 @@ pub async fn callback(State(hub): State<Hub>, Query(q): Query<CallbackParams>) -
     let outcome = match (q.code, q.state, q.error) {
         (_, _, Some(err)) => Err(q.error_description.unwrap_or(err)),
         (Some(code), Some(state), None) => hub
-            .finish_oauth(&code, &state)
+            .finish_oauth(&code, &state, q.iss.as_deref())
             .await
             .map_err(|e| format!("{e:#}")),
         _ => Err("missing code or state".into()),
