@@ -1,0 +1,111 @@
+@import 'tailwindcss';
+
+@custom-variant dark (@media (prefers-color-scheme: dark));
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-sidebar: var(--sidebar);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-grid: var(--grid);
+  --color-violet: var(--violet);
+  --color-violet-soft: var(--violet-soft);
+  --color-on-violet: var(--on-violet);
+  --color-live: var(--live);
+  --color-warn: var(--warn);
+  --color-fail: var(--fail);
+}
+
+:root {
+  --paper: #f3f2f8;
+  --surface: #ffffff;
+  --sidebar: #e9e7f2;
+  --ink: #1c1a2e;
+  --muted: #6b6883;
+  --grid: #dcd9e8;
+  --violet: #6d4aff;
+  --violet-soft: #ebe6ff;
+  --on-violet: #ffffff;
+  --live: #1f9d6b;
+  --warn: #c98a12;
+  --fail: #d2453b;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #15131f;
+    --surface: #1d1a2b;
+    --sidebar: #1a1727;
+    --ink: #eceaf6;
+    --muted: #9a96b3;
+    --grid: #2e2a40;
+    --violet: #9b85ff;
+    --violet-soft: #2a2350;
+    --on-violet: #15131f;
+    --live: #3cc48f;
+    --warn: #e0a73a;
+    --fail: #f06a5f;
+    color-scheme: dark;
+  }
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+input,
+textarea,
+select,
+.selectable {
+  user-select: text;
+}
+
+:focus-visible {
+  outline: 2px solid var(--violet);
+  outline-offset: 2px;
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center gap-1.5 rounded-md border border-grid bg-surface px-3 py-1.5 text-[13px] font-medium text-ink transition-colors hover:border-muted/50 disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply border-transparent bg-violet text-on-violet hover:border-transparent hover:brightness-110;
+  }
+  .btn-danger {
+    @apply text-fail hover:border-fail/50;
+  }
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-muted hover:text-ink;
+  }
+  .field {
+    @apply w-full rounded-md border border-grid bg-surface px-2.5 py-1.5 text-[13px] text-ink placeholder:text-muted/60 focus:border-violet focus:outline-none;
+  }
+  .label {
+    @apply mb-1 block text-[12px] font-medium text-muted;
+  }
+  .page-title {
+    @apply font-display text-[26px] font-semibold tracking-[-0.02em] text-ink;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
