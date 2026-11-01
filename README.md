@@ -63,6 +63,15 @@ pnpm build                                      # release .app + .dmg in target/
 # the temp volume: `CI=true pnpm build` skips the Finder window styling.
 ```
 
+Builds are ad-hoc signed unless `APPLE_SIGNING_IDENTITY` names a code signing certificate in your keychain
+(`security find-identity -v -p codesigning`). Sign with a stable identity for daily use: macOS ties keychain access to
+the app's signature, so an ad-hoc build asks for the keychain again after every rebuild. Release builds are also
+notarized when `APPLE_ID`, `APPLE_PASSWORD` (an app-specific password) and `APPLE_TEAM_ID` are set.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
+
 The dashboard opens from the menu bar icon, or by launching the app a second time. To iterate on the UI in a normal
 browser with mocked data, open `http://localhost:5173/preview.html#/profiles` while `pnpm dev` (or `pnpm --dir ui dev`)
 is running.

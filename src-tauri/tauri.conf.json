@@ -40,8 +40,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "12.0",
-      "signingIdentity": "Developer ID Application: Nando Davis (YJA4T2426W)"
+      "minimumSystemVersion": "12.0"
     }
   }
 }
