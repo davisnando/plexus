@@ -1,6 +1,6 @@
 //! Menu bar icon and its menu, rebuilt whenever hub state changes.
 
-use plexus_core::model::ConnectionStatus;
+use plexus_core::model::{ConnectionStatus, TunnelStatus};
 use tauri::{
     AppHandle, Manager,
     image::Image,
@@ -63,6 +63,18 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         (false, None) => "Plexus · starting…".to_string(),
     };
     menu.append(&MenuItem::with_id(app, "header", header, false, None::<&str>)?)?;
+    let tunnel = state.hub.tunnel_status();
+    let (tunnel_label, tunnel_toggle) = match &tunnel {
+        TunnelStatus::Off => ("Tunnel off".to_string(), "Start Tunnel"),
+        TunnelStatus::Starting => ("Tunnel starting…".to_string(), "Stop Tunnel"),
+        TunnelStatus::Running { url } => (
+            format!("Tunnel · {}", url.trim_start_matches("https://")),
+            "Stop Tunnel",
+        ),
+        TunnelStatus::Error { .. } => ("Tunnel failed".to_string(), "Retry Tunnel"),
+    };
+    menu.append(&MenuItem::with_id(app, "tunnel-status", tunnel_label, false, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "tunnel", tunnel_toggle, true, None::<&str>)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
 
     let connections = state.hub.list_connections().unwrap_or_default();
@@ -97,6 +109,15 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             true,
             None::<&str>,
         )?)?;
+        if matches!(tunnel, TunnelStatus::Running { .. }) {
+            copy.append(&MenuItem::with_id(
+                app,
+                format!("copy-public:{}", p.slug),
+                format!("{}  (public)", p.name),
+                true,
+                None::<&str>,
+            )?)?;
+        }
     }
     menu.append(&copy)?;
     menu.append(&MenuItem::with_id(
@@ -130,12 +151,28 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         "open" => show_dashboard(app, None),
         "add" => show_dashboard(app, Some("/connections/new")),
         "quit" => app.exit(0),
+        "tunnel" => {
+            let app = app.clone();
+            let enable = !matches!(
+                app.state::<AppState>().hub.tunnel_status(),
+                TunnelStatus::Running { .. } | TunnelStatus::Starting
+            );
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = crate::set_tunnel(&app, enable).await {
+                    tracing::warn!("tunnel: {e:#}");
+                }
+            });
+        }
         _ => {
             if let Some(conn) = id.strip_prefix("conn:") {
                 show_dashboard(app, Some(&format!("/connections/{conn}")));
             } else if let Some(slug) = id.strip_prefix("copy:") {
                 let url = app.state::<AppState>().profile_url(slug);
                 let _ = app.clipboard().write_text(url);
+            } else if let Some(slug) = id.strip_prefix("copy-public:")
+                && let Some(base) = app.state::<AppState>().hub.public_url()
+            {
+                let _ = app.clipboard().write_text(format!("{base}/mcp/{slug}"));
             }
         }
     }

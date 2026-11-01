@@ -11,4 +11,4 @@
   }
 </script>
 
-<button class="btn" onclick={copy}>{copied ? 'Copied' : label}</button>
+<button type="button" class="btn" onclick={copy}>{copied ? 'Copied' : label}</button>

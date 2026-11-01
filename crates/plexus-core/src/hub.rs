@@ -52,6 +52,12 @@ pub enum HubEvent {
     CallLogged {
         entry: CallLogEntry,
     },
+    TunnelStatus {
+        status: TunnelStatus,
+    },
+    GrantsChanged {
+        profile_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,6 +84,24 @@ pub enum ApprovalDecision {
 /// shell with a popup window; the hub applies the timeout.
 pub trait ApprovalBroker: Send + Sync {
     fn request(&self, req: ApprovalRequest) -> BoxFuture<'static, ApprovalDecision>;
+
+    /// Asks whether a remote client may sign in to a profile (OAuth consent).
+    /// The hub applies the timeout. Denies unless implemented.
+    fn request_grant(&self, _req: GrantRequest) -> BoxFuture<'static, bool> {
+        Box::pin(async { false })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GrantRequest {
+    pub id: String,
+    pub profile_name: String,
+    pub client_name: String,
+    /// Where the client sends the browser back to, e.g. `claude.ai`.
+    pub redirect_host: String,
+    /// Shown on the sign-in page too, so the user can match the two.
+    pub code: String,
+    pub timeout_secs: u64,
 }
 
 /// Opens a URL in the user's browser; returns whether that worked.
@@ -130,6 +154,8 @@ struct Inner {
     legacy_peers: Mutex<Vec<(String, Peer<RoleServer>)>>,
     shell_path: Option<String>,
     oauth: crate::oauth::PendingFlows,
+    remote: crate::remote::RemoteState,
+    tunnel: crate::tunnel::Tunnel,
 }
 
 struct Upstream {
@@ -259,6 +285,8 @@ impl Hub {
             legacy_peers: Mutex::new(Vec::new()),
             shell_path,
             oauth: Default::default(),
+            remote: Default::default(),
+            tunnel: Default::default(),
         }));
         hub.spawn_background();
         Ok(hub)
@@ -347,7 +375,7 @@ impl Hub {
         self.0.legacy_peers.lock().unwrap().push((profile_id, peer));
     }
 
-    fn emit(&self, event: HubEvent) {
+    pub(crate) fn emit(&self, event: HubEvent) {
         let _ = self.0.events.send(event);
     }
 
@@ -366,6 +394,14 @@ impl Hub {
 
     pub(crate) fn set_server_port(&self, port: u16) {
         self.0.server_port.store(port, Ordering::Relaxed);
+    }
+
+    pub(crate) fn server_port(&self) -> u16 {
+        self.0.server_port.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn approval_broker(&self) -> Option<Arc<dyn ApprovalBroker>> {
+        self.0.approval.read().unwrap().clone()
     }
 
     // ---- settings ----
@@ -800,6 +836,7 @@ impl Hub {
         for id in ids {
             self.stop_upstream(&id).await;
         }
+        self.stop_tunnel().await;
     }
 
     async fn reap_idle(&self) {
@@ -962,12 +999,26 @@ impl Hub {
         Ok(token)
     }
 
-    /// Constant-time token check; returns the profile id on success.
+    /// Checks the profile token (constant time) or an OAuth access token
+    /// issued for the profile; returns the profile id on success.
     pub fn authenticate(&self, slug: &str, token: &str) -> Option<String> {
         use subtle::ConstantTimeEq;
-        let tokens = self.0.tokens.read().unwrap();
-        let (id, expected) = tokens.get(slug)?;
-        bool::from(expected.as_bytes().ct_eq(token.as_bytes())).then(|| id.clone())
+        let id = {
+            let tokens = self.0.tokens.read().unwrap();
+            let (id, expected) = tokens.get(slug)?;
+            if bool::from(expected.as_bytes().ct_eq(token.as_bytes())) {
+                return Some(id.clone());
+            }
+            id.clone()
+        };
+        self.0.remote.check_access_token(&id, token).then_some(id)
+    }
+
+    pub fn profile_by_slug(&self, slug: &str) -> Option<Profile> {
+        self.list_profiles()
+            .ok()?
+            .into_iter()
+            .find(|p| p.slug == slug)
     }
 
     pub fn tool_policies(&self, profile_id: &str) -> Result<HashMap<(String, String), ToolPolicy>> {
@@ -1278,6 +1329,18 @@ impl Hub {
     pub(crate) fn oauth_flows(&self) -> &crate::oauth::PendingFlows {
         &self.0.oauth
     }
+
+    pub(crate) fn store(&self) -> &Store {
+        &self.0.store
+    }
+
+    pub(crate) fn remote(&self) -> &crate::remote::RemoteState {
+        &self.0.remote
+    }
+
+    pub(crate) fn tunnel(&self) -> &crate::tunnel::Tunnel {
+        &self.0.tunnel
+    }
 }
 
 fn initial_status(c: &Connection) -> ConnectionStatus {
@@ -1310,7 +1373,7 @@ fn result_text(r: &CallToolResult) -> String {
     text.chars().take(500).collect()
 }
 
-fn generate_token() -> String {
+pub(crate) fn generate_token() -> String {
     use base64::Engine;
     let bytes: [u8; 32] = rand::random();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)

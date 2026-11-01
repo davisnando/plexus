@@ -193,16 +193,22 @@ pub async fn callback(State(hub): State<Hub>, Query(q): Query<CallbackParams>) -
         ),
         Err(e) => ("Sign-in failed".to_string(), escape(&e)),
     };
-    Html(format!(
-        r#"<!doctype html><meta charset="utf-8"><title>{title} · Plexus</title>
-<style>body{{font:15px -apple-system,system-ui,sans-serif;display:grid;place-items:center;height:90vh;margin:0;background:#f3f2f8;color:#1c1a2e}}
-@media(prefers-color-scheme:dark){{body{{background:#15131f;color:#eceaf6}}}}main{{max-width:28rem;text-align:center}}h1{{font-size:22px}}</style>
-<main><h1>{title}</h1><p>{body}</p></main>"#
-    ))
+    Html(html_page(&title, &body, ""))
 }
 
-fn escape(s: &str) -> String {
+/// A small standalone page for browser legs of OAuth flows. `body` is HTML.
+pub(crate) fn html_page(title: &str, body: &str, head: &str) -> String {
+    format!(
+        r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{head}<title>{title} · Plexus</title>
+<style>body{{font:15px -apple-system,system-ui,sans-serif;display:grid;place-items:center;height:90vh;margin:0 16px;background:#f3f2f8;color:#1c1a2e}}
+@media(prefers-color-scheme:dark){{body{{background:#15131f;color:#eceaf6}}}}main{{max-width:28rem;text-align:center;line-height:1.5}}h1{{font-size:22px}}</style>
+<main><h1>{title}</h1><div>{body}</div></main>"#
+    )
+}
+
+pub(crate) fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }

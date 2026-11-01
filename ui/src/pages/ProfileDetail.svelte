@@ -1,8 +1,18 @@
 <script lang="ts">
+  import { listen } from '@tauri-apps/api/event';
   import { onMount } from 'svelte';
-  import { api, profileInput, type ProfileMode, type ProfileTool, type ToolPolicy } from '../lib/api';
+  import {
+    api,
+    profileInput,
+    type HubEvent,
+    type ProfileMode,
+    type ProfileTool,
+    type RemoteGrant,
+    type ToolPolicy,
+  } from '../lib/api';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import CopyButton from '../lib/CopyButton.svelte';
+  import { timeAgo } from '../lib/format';
   import { hub, profileById, reloadProfiles } from '../lib/hub.svelte';
   import { navigate } from '../lib/router.svelte';
 
@@ -12,15 +22,34 @@
   let token = $state('');
   let reveal = $state(false);
   let tools = $state<ProfileTool[]>([]);
-  let client = $state<'claude-code' | 'cursor' | 'vscode' | 'claude-desktop'>('claude-code');
+  let client = $state<'claude-code' | 'cursor' | 'vscode' | 'claude-desktop' | 'claude-web'>('claude-code');
+  let usePublic = $state(false);
+  let grants = $state<RemoteGrant[]>([]);
   let editing = $state(false);
   let name = $state('');
   let slug = $state('');
   let error = $state('');
 
-  onMount(async () => {
-    token = await api.profileToken(id);
-    tools = await api.profileTools(id);
+  const loadGrants = () => api.remoteGrants(id).then((g) => (grants = g));
+
+  function hostOf(uri: string): string {
+    try {
+      return new URL(uri).host || uri;
+    } catch {
+      return uri;
+    }
+  }
+
+  onMount(() => {
+    api.profileToken(id).then((t) => (token = t));
+    api.profileTools(id).then((t) => (tools = t));
+    loadGrants();
+    const un = listen<HubEvent>('hub-event', ({ payload: e }) => {
+      if (e.type === 'grants_changed' && e.profile_id === id) loadGrants();
+    });
+    return () => {
+      un.then((f) => f());
+    };
   });
 
   // Refresh tool rows when membership or connections change.
@@ -33,17 +62,25 @@
   const masked = $derived(reveal ? token : token.slice(0, 4) + '•'.repeat(18));
   const serverName = $derived(`plexus-${p?.slug}`);
 
+  // Snippets for another machine use the tunnel address.
+  const endpoint = $derived(usePublic && p?.public_url ? p.public_url : (p?.url ?? ''));
+  const remoteOnly = $derived(client === 'claude-web');
+
   function snippet(tok: string): string {
     if (!p) return '';
     const auth = `Bearer ${tok}`;
     switch (client) {
+      case 'claude-web':
+        return p.public_url
+          ? `1. In claude.ai, open Settings → Connectors → Add custom connector.\n2. Name it ${p.name} and paste this URL:\n\n   ${p.public_url}\n\n3. Click Connect, then Allow in the Plexus popup on this Mac.`
+          : 'Turn on the public tunnel in Settings first. claude.ai reaches Plexus from the internet, not from this Mac.';
       case 'claude-code':
-        return `claude mcp add --transport http --scope user ${serverName} ${p.url} \\\n  --header "Authorization: ${auth}"`;
+        return `claude mcp add --transport http --scope user ${serverName} ${endpoint} \\\n  --header "Authorization: ${auth}"`;
       case 'cursor':
-        return JSON.stringify({ mcpServers: { [serverName]: { url: p.url, headers: { Authorization: auth } } } }, null, 2);
+        return JSON.stringify({ mcpServers: { [serverName]: { url: endpoint, headers: { Authorization: auth } } } }, null, 2);
       case 'vscode':
         return JSON.stringify(
-          { servers: { [serverName]: { type: 'http', url: p.url, headers: { Authorization: auth } } } },
+          { servers: { [serverName]: { type: 'http', url: endpoint, headers: { Authorization: auth } } } },
           null,
           2,
         );
@@ -53,7 +90,7 @@
             mcpServers: {
               [serverName]: {
                 command: 'npx',
-                args: ['-y', 'mcp-remote', p.url, '--header', 'Authorization:${PLEXUS_AUTH}'],
+                args: ['-y', 'mcp-remote', endpoint, '--header', 'Authorization:${PLEXUS_AUTH}'],
                 env: { PLEXUS_AUTH: auth },
               },
             },
@@ -69,6 +106,7 @@
     ['cursor', 'Cursor', 'Merge into ~/.cursor/mcp.json.'],
     ['vscode', 'VS Code', 'Merge into your user mcp.json (Command Palette → MCP: Open User Configuration).'],
     ['claude-desktop', 'Claude Desktop', 'Merge into claude_desktop_config.json. Needs Node.js, since Desktop bridges HTTP through mcp-remote.'],
+    ['claude-web', 'claude.ai', 'Web and mobile connectors sign in with OAuth through the tunnel. You approve each sign-in on this Mac.'],
   ] as const;
 
   let installing = $state(false);
@@ -78,6 +116,7 @@
     installing = true;
     installMsg = null;
     try {
+      if (client === 'claude-web') return;
       installMsg = { ok: true, text: await api.installClient(id, client) };
     } catch (e) {
       installMsg = { ok: false, text: String(e) };
@@ -166,6 +205,16 @@
       <span class="text-[12px] text-muted">Endpoint</span>
       <span class="selectable truncate font-mono text-[12.5px]">{p.url}</span>
       <div><CopyButton value={p.url} /></div>
+      <span class="text-[12px] text-muted">Public</span>
+      {#if p.public_url}
+        <span class="selectable truncate font-mono text-[12.5px]">{p.public_url}</span>
+        <div><CopyButton value={p.public_url} /></div>
+      {:else}
+        <span class="col-span-2 text-[12.5px] text-muted">
+          {hub.tunnel.state === 'starting' ? 'Tunnel starting…' : 'Tunnel off.'}
+          <a href="#/settings" class="text-violet hover:underline">Settings</a>
+        </span>
+      {/if}
       <span class="text-[12px] text-muted">Token</span>
       <button class="selectable truncate text-left font-mono text-[12.5px]" onclick={() => (reveal = !reveal)} title="Click to {reveal ? 'hide' : 'show'}"
         >{masked}</button
@@ -193,22 +242,61 @@
         >
       {/each}
     </div>
-    <p class="mt-2 text-[12px] text-muted">{clients.find((c) => c[0] === client)?.[2]}</p>
+    <div class="mt-2 flex items-center justify-between gap-4">
+      <p class="text-[12px] text-muted">{clients.find((c) => c[0] === client)?.[2]}</p>
+      {#if p.public_url && !remoteOnly}
+        <label class="flex shrink-0 items-center gap-1.5 text-[12px] text-muted">
+          <input type="checkbox" class="accent-violet" bind:checked={usePublic} /> Use public URL
+        </label>
+      {/if}
+    </div>
     <div class="mt-2 flex items-start gap-3">
-      <pre class="selectable flex-1 overflow-x-auto rounded-lg border border-grid bg-paper px-3.5 py-3 font-mono text-[11.5px] leading-relaxed">{snippet(
-          reveal ? token : masked,
-        )}</pre>
+      <pre class="selectable flex-1 overflow-x-auto rounded-lg border border-grid bg-paper px-3.5 py-3 font-mono text-[11.5px] leading-relaxed {remoteOnly
+          ? 'whitespace-pre-wrap font-sans text-[12.5px]'
+          : ''}">{snippet(reveal ? token : masked)}</pre>
       <div class="flex flex-col gap-2">
-        <button class="btn btn-primary" onclick={install} disabled={installing}>
-          {installing ? 'Adding…' : `Add to ${clients.find((c) => c[0] === client)?.[1]}`}
-        </button>
-        <CopyButton value={async () => snippet(token)} />
+        {#if remoteOnly}
+          {#if p.public_url}<CopyButton value={p.public_url} label="Copy URL" />{/if}
+        {:else}
+          {#if !(usePublic && p.public_url)}
+            <button class="btn btn-primary" onclick={install} disabled={installing}>
+              {installing ? 'Adding…' : `Add to ${clients.find((c) => c[0] === client)?.[1]}`}
+            </button>
+          {/if}
+          <CopyButton value={async () => snippet(token)} />
+        {/if}
       </div>
     </div>
     {#if installMsg}
       <p class="mt-2 text-[12.5px] {installMsg.ok ? 'text-live' : 'text-fail'}">{installMsg.text}</p>
     {/if}
   </section>
+
+  {#if grants.length}
+    <section class="mt-8">
+      <h2 class="font-display text-[15px] font-semibold">Remote sign-ins</h2>
+      <p class="mt-1 text-[12px] text-muted">Clients you allowed over OAuth. Revoking one signs it out immediately.</p>
+      <ul class="mt-3 divide-y divide-grid overflow-hidden rounded-xl border border-grid bg-surface">
+        {#each grants as g (g.id)}
+          <li class="flex items-center gap-4 px-4 py-2.5">
+            <div class="min-w-0 flex-1">
+              <div class="truncate font-medium">{g.client_name}</div>
+              <div class="selectable truncate text-[11.5px] text-muted">
+                {hostOf(g.redirect_uri)} · signed in {timeAgo(g.created_at)} · last refreshed {timeAgo(g.last_used_at)}
+              </div>
+            </div>
+            <ConfirmButton
+              class="btn btn-ghost"
+              label="Revoke"
+              confirmLabel="Revoke access"
+              warning="The client has to sign in again."
+              onconfirm={() => api.revokeGrant(g.id)}
+            />
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
 
   <section class="mt-8">
     <h2 class="font-display text-[15px] font-semibold">How tools are offered</h2>

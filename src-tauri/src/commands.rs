@@ -1,17 +1,17 @@
 //! IPC commands for the dashboard. Thin wrappers over `plexus_core::Hub`.
 
 use plexus_core::{
-    ApprovalDecision, ApprovalRequest,
+    ApprovalDecision,
     model::{
         CallLogEntry, Connection, ConnectionInput, ConnectionStatus, Profile, ProfileInput,
-        Settings, ToolPolicy,
+        RemoteGrant, Settings, ToolPolicy, TunnelStatus,
     },
     naming,
 };
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
-use crate::AppState;
+use crate::{AppState, approvals::Prompt};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -116,11 +116,17 @@ pub struct ProfileView {
     #[serde(flatten)]
     profile: Profile,
     url: String,
+    /// Through the tunnel, while it is up.
+    public_url: Option<String>,
 }
 
 fn profile_view(state: &AppState, profile: Profile) -> ProfileView {
     ProfileView {
         url: state.profile_url(&profile.slug),
+        public_url: state
+            .hub
+            .public_url()
+            .map(|base| format!("{base}/mcp/{}", profile.slug)),
         profile,
     }
 }
@@ -241,9 +247,11 @@ pub fn get_settings(state: State<'_, AppState>) -> CmdResult<Settings> {
 pub async fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
-    settings: Settings,
+    mut settings: Settings,
 ) -> CmdResult<()> {
     let old = state.hub.settings().map_err(err)?;
+    // Owned by `set_tunnel`, which also starts and stops it.
+    settings.tunnel_enabled = old.tunnel_enabled;
     state.hub.save_settings(&settings).map_err(err)?;
     if old.port != settings.port {
         crate::restart_server(&app).await;
@@ -264,7 +272,7 @@ pub fn server_status(state: State<'_, AppState>) -> ServerStatus {
 }
 
 #[tauri::command]
-pub fn get_approval(state: State<'_, AppState>, id: String) -> Option<ApprovalRequest> {
+pub fn get_approval(state: State<'_, AppState>, id: String) -> Option<Prompt> {
     state.approvals.get(&id)
 }
 
@@ -313,4 +321,24 @@ pub async fn install_client(
     .await
     .map_err(err)?
     .map_err(err)
+}
+
+#[tauri::command]
+pub fn tunnel_status(state: State<'_, AppState>) -> TunnelStatus {
+    state.hub.tunnel_status()
+}
+
+#[tauri::command]
+pub async fn set_tunnel(app: AppHandle, enabled: bool) -> CmdResult<()> {
+    crate::set_tunnel(&app, enabled).await.map_err(err)
+}
+
+#[tauri::command]
+pub fn remote_grants(state: State<'_, AppState>, profile_id: String) -> CmdResult<Vec<RemoteGrant>> {
+    state.hub.remote_grants(&profile_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn revoke_grant(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.hub.revoke_grant(&id).map_err(err)
 }

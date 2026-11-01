@@ -1,20 +1,29 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, type ApprovalDecision, type ApprovalRequest } from '../lib/api';
+  import { api, type ApprovalDecision, type Prompt } from '../lib/api';
 
   let { id }: { id: string } = $props();
-  let req = $state<ApprovalRequest | null>(null);
+  let req = $state<Prompt | null>(null);
   let total = $state(60);
   let left = $state(60);
 
   onMount(() => {
-    api.getApproval(id).then((r) => (req = r));
-    api.getSettings().then((s) => (total = left = s.approval_timeout_secs)).catch(() => {});
+    api.getApproval(id).then((r) => {
+      req = r;
+      if (r?.kind === 'grant') total = left = r.timeout_secs;
+    });
+    api
+      .getSettings()
+      .then((s) => {
+        if (req?.kind !== 'grant') total = left = s.approval_timeout_secs;
+      })
+      .catch(() => {});
     const started = Date.now();
     const t = setInterval(() => (left = Math.max(0, total - (Date.now() - started) / 1000)), 250);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') decide('deny');
-      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) decide('allow_once');
+      // Sign-ins have no keyboard shortcut: allowing one should be a deliberate click.
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && req?.kind === 'call') decide('allow_once');
     };
     window.addEventListener('keydown', onKey);
     return () => {
@@ -24,14 +33,14 @@
   });
 
   const decide = (d: ApprovalDecision) => api.resolveApproval(id, d);
-  const args = $derived(req?.arguments == null ? '{}' : JSON.stringify(req.arguments, null, 2));
+  const args = $derived(req?.kind !== 'call' || req.arguments == null ? '{}' : JSON.stringify(req.arguments, null, 2));
 </script>
 
 <div class="flex h-screen flex-col bg-surface">
   <div class="h-1 bg-grid">
     <div class="h-full bg-warn transition-[width] duration-300 ease-linear" style="width: {(left / total) * 100}%"></div>
   </div>
-  {#if req}
+  {#if req?.kind === 'call'}
     <div class="flex flex-1 flex-col gap-4 overflow-hidden p-5" data-tauri-drag-region>
       <div data-tauri-drag-region>
         <p class="text-[12px] text-muted">{req.profile_name} wants to run</p>
@@ -51,6 +60,30 @@
         <button class="btn ml-auto" onclick={() => decide('always_allow')}>Always allow</button>
         <!-- svelte-ignore a11y_autofocus -->
         <button class="btn btn-primary" onclick={() => decide('allow_once')} autofocus>Allow once</button>
+      </div>
+    </div>
+  {:else if req?.kind === 'grant'}
+    <div class="flex flex-1 flex-col gap-4 overflow-hidden p-5" data-tauri-drag-region>
+      <div data-tauri-drag-region>
+        <p class="text-[12px] text-muted">Remote sign-in to {req.profile_name}</p>
+        <p class="selectable mt-1 break-all text-[15px] font-semibold">{req.client_name}</p>
+        <p class="mt-0.5 text-[12px] text-muted">
+          returns to <span class="selectable font-mono text-ink">{req.redirect_host}</span>
+        </p>
+      </div>
+      <div class="flex items-center gap-4 rounded-lg border border-grid bg-paper px-4 py-3">
+        <span class="selectable font-mono text-[26px] font-semibold tracking-[0.2em]">{req.code}</span>
+        <span class="text-[12px] leading-snug text-muted">
+          Allow only if you just started this sign-in and your browser shows the same code.
+        </span>
+      </div>
+      <p class="text-[12px] leading-snug text-muted">
+        It can use every tool in this profile through the tunnel until you revoke it on the profile page.
+      </p>
+      <div class="mt-auto flex items-center gap-2">
+        <button class="btn btn-danger" onclick={() => decide('deny')}>Deny</button>
+        <span class="text-[11.5px] tabular-nums text-muted">{Math.ceil(left)}s</span>
+        <button class="btn btn-primary ml-auto" onclick={() => decide('allow_once')}>Allow</button>
       </div>
     </div>
   {:else}

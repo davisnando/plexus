@@ -2,6 +2,7 @@
   import { disable, enable, isEnabled } from '@tauri-apps/plugin-autostart';
   import { onMount } from 'svelte';
   import { api, type Settings } from '../lib/api';
+  import CopyButton from '../lib/CopyButton.svelte';
   import { hub } from '../lib/hub.svelte';
 
   let s = $state<Settings | null>(null);
@@ -23,6 +24,20 @@
       setTimeout(() => (saved = false), 1500);
     } catch (err) {
       error = String(err);
+    }
+  }
+
+  let tunnelBusy = $state(false);
+  const tunnelOn = $derived(hub.tunnel.state === 'running' || hub.tunnel.state === 'starting');
+
+  async function toggleTunnel(enabled: boolean) {
+    tunnelBusy = true;
+    try {
+      await api.setTunnel(enabled);
+    } catch {
+      // The status line shows why.
+    } finally {
+      tunnelBusy = false;
     }
   }
 
@@ -87,6 +102,39 @@
         <input class="field w-20 tabular-nums" type="number" min="1" max="365" bind:value={s.log_retention_days} /> days
       </span>
     </label>
+
+    <div class="flex flex-col gap-3 border-t border-grid pt-5">
+      <label class="flex items-center justify-between gap-6">
+        <span>
+          <span class="block font-medium">Public tunnel</span>
+          <span class="text-[12px] text-muted">
+            Makes your profiles reachable from the internet through a Cloudflare quick tunnel, for claude.ai, ChatGPT or
+            agents on other machines. Requests still need the profile token or a sign-in you approve on this Mac.
+          </span>
+        </span>
+        <input
+          type="checkbox"
+          class="size-4 shrink-0 accent-violet"
+          checked={tunnelOn}
+          disabled={tunnelBusy}
+          onchange={(e) => toggleTunnel(e.currentTarget.checked)}
+        />
+      </label>
+      {#if hub.tunnel.state === 'running'}
+        <div class="flex items-center gap-3 rounded-lg border border-grid bg-paper px-3 py-2">
+          <span class="size-1.5 shrink-0 rounded-full bg-live"></span>
+          <span class="selectable min-w-0 flex-1 truncate font-mono text-[12px]">{hub.tunnel.url}</span>
+          <CopyButton value={hub.tunnel.url} />
+        </div>
+        <p class="text-[12px] text-muted">
+          The address changes each time the tunnel starts. Profile pages show each profile's public endpoint.
+        </p>
+      {:else if hub.tunnel.state === 'starting'}
+        <p class="text-[12px] text-muted">Starting tunnel…</p>
+      {:else if hub.tunnel.state === 'error'}
+        <pre class="selectable max-h-40 overflow-auto whitespace-pre-wrap text-[12px] text-fail">{hub.tunnel.message}</pre>
+      {/if}
+    </div>
 
     <div class="flex items-center gap-3 border-t border-grid pt-5">
       <button class="btn btn-primary">Save settings</button>

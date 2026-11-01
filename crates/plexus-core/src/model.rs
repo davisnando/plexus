@@ -237,11 +237,14 @@ pub struct CallLogEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub port: u16,
     pub default_idle_timeout_secs: u64,
     pub log_retention_days: u32,
     pub approval_timeout_secs: u64,
+    /// Start the public tunnel together with the server.
+    pub tunnel_enabled: bool,
 }
 
 impl Default for Settings {
@@ -251,6 +254,28 @@ impl Default for Settings {
             default_idle_timeout_secs: 600,
             log_retention_days: 7,
             approval_timeout_secs: 60,
+            tunnel_enabled: false,
         }
     }
+}
+
+/// The public tunnel: a Cloudflare quick tunnel to the local server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum TunnelStatus {
+    Off,
+    Starting,
+    Running { url: String },
+    Error { message: String },
+}
+
+/// A remote client that signed in to a profile over OAuth.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteGrant {
+    pub id: String,
+    pub profile_id: String,
+    pub client_name: String,
+    pub redirect_uri: String,
+    pub created_at: Timestamp,
+    pub last_used_at: Timestamp,
 }

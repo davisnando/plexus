@@ -67,6 +67,17 @@
             Listening
           </div>
           <div class="selectable mt-0.5 font-mono text-[11px] text-muted">127.0.0.1:{hub.server.port}</div>
+          {#if hub.tunnel.state === 'running'}
+            <a href="#/settings" class="mt-1.5 flex items-center gap-1.5 text-ink/80" title={hub.tunnel.url}>
+              <span class="size-1.5 rounded-full bg-violet"></span>
+              Tunnel on
+            </a>
+          {:else if hub.tunnel.state === 'error'}
+            <a href="#/settings" class="mt-1.5 flex items-center gap-1.5 text-fail">
+              <span class="size-1.5 rounded-full bg-fail"></span>
+              Tunnel failed
+            </a>
+          {/if}
         {:else if hub.server.error}
           <div class="flex items-center gap-1.5 text-fail">
             <span class="size-1.5 rounded-full bg-fail"></span>

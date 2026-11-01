@@ -34,11 +34,19 @@ Cursor      ──► http://127.0.0.1:7420/mcp/side ──► linear · sentry_
 - **Activity log.** Tool, connection, duration and status for each call. Arguments and results are never stored.
 - **One-click client setup** for Claude Code (via `claude mcp add`), Cursor, VS Code and Claude Desktop (via
   `mcp-remote`). Config files are merged and backed up to `*.plexus.bak` first.
+- **Public tunnel.** One switch starts a Cloudflare quick tunnel (`brew install cloudflared`, no account), so every
+  profile also gets an `https://….trycloudflare.com/mcp/{slug}` endpoint. CLI agents elsewhere use the profile token.
+  claude.ai and ChatGPT custom connectors sign in with OAuth: each profile is its own authorization server, and you
+  approve every sign-in in a popup on your Mac. Sign-ins are listed on the profile page and can be revoked. The
+  address changes each time the tunnel starts.
 
 ## Security model
 
-The server binds `127.0.0.1` only. Every request needs the profile's bearer token (compared in constant time).
-Requests carrying an `Origin` header are rejected, which blocks browser pages, including DNS-rebinding attacks.
+The server binds `127.0.0.1` only. Every request needs the profile's bearer token (compared in constant time) or an
+OAuth access token you approved for that profile. Requests carrying an `Origin` header are rejected, which blocks
+browser pages, and a `Host` other than localhost or the tunnel's hostname is refused, which blocks DNS rebinding.
+Through the tunnel only `/mcp/*`, the OAuth routes and `/health` are reachable. Opening the tunnel URL alone gets
+nobody in: OAuth needs a click on this Mac, and at most three sign-in prompts can wait at once.
 
 ## Develop
 
@@ -48,7 +56,7 @@ Requirements: Rust 1.99+, Node 26+, pnpm 11.
 pnpm install
 pnpm dev                 # tauri dev: Vite + the app (it appears in the menu bar)
 cargo test -p plexus-core                       # unit + end-to-end proxy tests
-cargo test -p plexus-core -- --ignored          # live OAuth discovery tests (network)
+cargo test -p plexus-core -- --ignored          # live OAuth discovery + quick tunnel tests (network, cloudflared)
 pnpm --dir ui check                             # svelte-check
 pnpm build                                      # release .app + .dmg in target/release/bundle
 # If the dmg step fails with "hdiutil: couldn't unmount ... Resource busy", Finder/Spotlight grabbed

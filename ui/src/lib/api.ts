@@ -64,6 +64,8 @@ export interface Profile {
   connection_ids: string[];
   created_at: number;
   url: string;
+  /** Through the tunnel, while it is up. */
+  public_url: string | null;
 }
 
 export interface ProfileInput {
@@ -99,6 +101,21 @@ export interface Settings {
   default_idle_timeout_secs: number;
   log_retention_days: number;
   approval_timeout_secs: number;
+  tunnel_enabled: boolean;
+}
+
+export type TunnelStatus =
+  | { state: 'off' | 'starting' }
+  | { state: 'running'; url: string }
+  | { state: 'error'; message: string };
+
+export interface RemoteGrant {
+  id: string;
+  profile_id: string;
+  client_name: string;
+  redirect_uri: string;
+  created_at: number;
+  last_used_at: number;
 }
 
 export interface ServerStatus {
@@ -117,6 +134,17 @@ export interface ApprovalRequest {
   reason: string | null;
 }
 
+export interface GrantRequest {
+  id: string;
+  profile_name: string;
+  client_name: string;
+  redirect_host: string;
+  code: string;
+  timeout_secs: number;
+}
+
+export type Prompt = ({ kind: 'call' } & ApprovalRequest) | ({ kind: 'grant' } & GrantRequest);
+
 export type ClientKind = 'claude-code' | 'claude-desktop' | 'cursor' | 'vscode';
 
 export type ApprovalDecision = 'allow_once' | 'always_allow' | 'deny';
@@ -126,7 +154,9 @@ export type HubEvent =
   | { type: 'capabilities_changed'; connection_id: string }
   | { type: 'connections_changed' }
   | { type: 'profiles_changed' }
-  | { type: 'call_logged'; entry: CallLogEntry };
+  | { type: 'call_logged'; entry: CallLogEntry }
+  | { type: 'tunnel_status'; status: TunnelStatus }
+  | { type: 'grants_changed'; profile_id: string };
 
 export const api = {
   listConnections: () => invoke<Connection[]>('list_connections'),
@@ -154,7 +184,7 @@ export const api = {
   saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
   serverStatus: () => invoke<ServerStatus>('server_status'),
 
-  getApproval: (id: string) => invoke<ApprovalRequest | null>('get_approval', { id }),
+  getApproval: (id: string) => invoke<Prompt | null>('get_approval', { id }),
   resolveApproval: (id: string, decision: ApprovalDecision) =>
     invoke<void>('resolve_approval', { id, decision }),
 
@@ -162,6 +192,11 @@ export const api = {
   signOut: (id: string) => invoke<void>('sign_out', { id }),
   installClient: (profileId: string, client: ClientKind) =>
     invoke<string>('install_client', { profileId, client }),
+
+  tunnelStatus: () => invoke<TunnelStatus>('tunnel_status'),
+  setTunnel: (enabled: boolean) => invoke<void>('set_tunnel', { enabled }),
+  remoteGrants: (profileId: string) => invoke<RemoteGrant[]>('remote_grants', { profileId }),
+  revokeGrant: (id: string) => invoke<void>('revoke_grant', { id }),
 };
 
 export function toInput(c: Connection): ConnectionInput {

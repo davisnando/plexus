@@ -1,4 +1,5 @@
-//! Local HTTP endpoint: `POST|GET|DELETE /mcp/{profile}` with a bearer token.
+//! Local HTTP endpoint: `POST|GET|DELETE /mcp/{profile}` with a bearer token,
+//! plus the OAuth routes remote clients use through the tunnel.
 
 use std::{
     collections::HashMap,
@@ -12,8 +13,9 @@ use axum::{
     extract::FromRef,
     extract::{Path, Request, State},
     http::{StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::{any, get, post},
 };
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -23,6 +25,7 @@ use tower::ServiceExt;
 
 use crate::{
     hub::{Hub, HubEvent},
+    remote::{self, PublicBase},
     server::HubServer,
 };
 
@@ -103,6 +106,32 @@ pub async fn serve(hub: Hub, port: u16) -> Result<HttpServer> {
         .route("/health", get(|| async { "ok" }))
         .route("/mcp/{slug}", any(mcp))
         .route("/oauth/callback", get(crate::oauth::callback))
+        .route(
+            "/.well-known/oauth-protected-resource/mcp/{slug}",
+            get(remote::resource_metadata),
+        )
+        // RFC 8414 path insertion, plus the OIDC and path-appended forms some clients try.
+        .route(
+            "/.well-known/oauth-authorization-server/auth/{slug}",
+            get(remote::server_metadata),
+        )
+        .route(
+            "/.well-known/openid-configuration/auth/{slug}",
+            get(remote::server_metadata),
+        )
+        .route(
+            "/auth/{slug}/.well-known/oauth-authorization-server",
+            get(remote::server_metadata),
+        )
+        .route(
+            "/auth/{slug}/.well-known/openid-configuration",
+            get(remote::server_metadata),
+        )
+        .route("/auth/{slug}/register", post(remote::register))
+        .route("/auth/{slug}/authorize", get(remote::authorize))
+        .route("/auth/{slug}/authorize/wait", get(remote::authorize_wait))
+        .route("/auth/{slug}/token", post(remote::token))
+        .layer(middleware::from_fn_with_state(hub.clone(), guard))
         .with_state(state);
 
     let task = tokio::spawn({
@@ -119,6 +148,47 @@ pub async fn serve(hub: Hub, port: u16) -> Result<HttpServer> {
     Ok(HttpServer { addr, ct, task })
 }
 
+/// Splits `host[:port]`, keeping IPv6 brackets: `[::1]:7420` → `[::1]`.
+fn hostname(host: &str) -> &str {
+    match host.rfind(':') {
+        Some(i) if !host[i..].contains(']') => &host[..i],
+        _ => host,
+    }
+}
+
+/// Requests through the tunnel arrive from cloudflared on loopback, so they
+/// are told apart by `Host` (the public hostname) and Cloudflare's `cf-ray`.
+/// They may only reach the MCP and OAuth routes; everything else, such as
+/// the upstream OAuth callback, stays local. Any other `Host` is refused,
+/// which blocks DNS rebinding.
+async fn guard(State(hub): State<Hub>, mut req: Request, next: Next) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let via_cloudflare = req.headers().contains_key("cf-ray");
+    let local = matches!(hostname(&host), "127.0.0.1" | "localhost" | "[::1]") && !via_cloudflare;
+    let base = if local {
+        format!("http://{host}")
+    } else if hub.tunnel_host().is_some_and(|h| h == host) {
+        let path = req.uri().path();
+        let public = path == "/health"
+            || path.starts_with("/mcp/")
+            || path.starts_with("/auth/")
+            || path.starts_with("/.well-known/");
+        if !public {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        format!("https://{host}")
+    } else {
+        return (StatusCode::FORBIDDEN, "unexpected Host header").into_response();
+    };
+    req.extensions_mut().insert(PublicBase(base));
+    next.run(req).await
+}
+
 async fn mcp(State(state): State<AppState>, Path(slug): Path<String>, req: Request) -> Response {
     let token = req
         .headers()
@@ -127,12 +197,22 @@ async fn mcp(State(state): State<AppState>, Path(slug): Path<String>, req: Reque
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default();
     let Some(profile_id) = state.hub.authenticate(&slug, token) else {
-        return (
+        let mut response = (
             StatusCode::UNAUTHORIZED,
             [(header::CONTENT_TYPE, "application/json")],
             r#"{"error":"invalid or missing bearer token for this profile"}"#,
         )
             .into_response();
+        // Points OAuth clients (claude.ai connectors) at the sign-in flow.
+        if let Some(PublicBase(base)) = req.extensions().get::<PublicBase>()
+            && state.hub.profile_by_slug(&slug).is_some()
+            && let Ok(value) = remote::www_authenticate(base, &slug).parse()
+        {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, value);
+        }
+        return response;
     };
     let service = {
         let mut services = state.services.lock().unwrap();
@@ -143,6 +223,8 @@ async fn mcp(State(state): State<AppState>, Path(slug): Path<String>, req: Reque
                 let hub = state.hub.clone();
                 let config = StreamableHttpServerConfig::default()
                     .with_cancellation_token(token.clone())
+                    // `guard` checks Host, including the tunnel's public hostname.
+                    .disable_allowed_hosts()
                     // Non-browser MCP clients don't send Origin; any browser page does.
                     .enforce_origin_validation();
                 let service = StreamableHttpService::new(

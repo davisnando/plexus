@@ -54,6 +54,24 @@ CREATE TABLE settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+"#, r#"
+CREATE TABLE oauth_clients (
+    client_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    redirect_uris TEXT NOT NULL,
+    secret_hash TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE oauth_grants (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+    redirect_uri TEXT NOT NULL,
+    refresh_hash TEXT NOT NULL UNIQUE,
+    refresh_expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL
+);
 "#];
 
 /// SQLite-backed persistence for everything except secrets.
@@ -373,6 +391,148 @@ impl Store {
         )?;
         Ok(())
     }
+
+    // ---- remote OAuth clients and grants ----
+
+    pub fn insert_oauth_client(&self, c: &OAuthClient) -> Result<()> {
+        self.db().execute(
+            "INSERT INTO oauth_clients (client_id, name, redirect_uris, secret_hash, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                c.client_id,
+                c.name,
+                serde_json::to_string(&c.redirect_uris)?,
+                c.secret_hash,
+                now()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn oauth_client(&self, client_id: &str) -> Result<Option<OAuthClient>> {
+        let row = self
+            .db()
+            .query_row(
+                "SELECT client_id, name, redirect_uris, secret_hash FROM oauth_clients WHERE client_id = ?1",
+                [client_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row.map(|(client_id, name, uris, secret_hash)| OAuthClient {
+            client_id,
+            name,
+            redirect_uris: serde_json::from_str(&uris).unwrap_or_default(),
+            secret_hash,
+        }))
+    }
+
+    /// Registration is open to anyone who can reach the tunnel, so keep only
+    /// the newest `keep` clients that have no grants.
+    pub fn prune_oauth_clients(&self, keep: usize) -> Result<()> {
+        self.db().execute(
+            "DELETE FROM oauth_clients WHERE client_id IN (
+                SELECT client_id FROM oauth_clients
+                WHERE client_id NOT IN (SELECT client_id FROM oauth_grants)
+                ORDER BY created_at DESC LIMIT -1 OFFSET ?1)",
+            [keep as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_grant(&self, g: &RemoteGrant, client_id: &str, refresh: &RefreshToken) -> Result<()> {
+        self.db().execute(
+            "INSERT INTO oauth_grants (id, profile_id, client_id, redirect_uri, refresh_hash,
+             refresh_expires_at, created_at, last_used_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                g.id,
+                g.profile_id,
+                client_id,
+                g.redirect_uri,
+                refresh.hash,
+                refresh.expires_at,
+                g.created_at,
+                g.last_used_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// `(grant id, profile id, client id, refresh expiry)` for a refresh token hash.
+    pub fn grant_by_refresh(&self, hash: &str) -> Result<Option<(String, String, String, Timestamp)>> {
+        Ok(self
+            .db()
+            .query_row(
+                "SELECT id, profile_id, client_id, refresh_expires_at FROM oauth_grants WHERE refresh_hash = ?1",
+                [hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?)
+    }
+
+    /// Swap in a new refresh token; false if the old one was already used.
+    pub fn rotate_refresh(&self, grant_id: &str, old_hash: &str, new: &RefreshToken) -> Result<bool> {
+        let n = self.db().execute(
+            "UPDATE oauth_grants SET refresh_hash = ?3, refresh_expires_at = ?4, last_used_at = ?5
+             WHERE id = ?1 AND refresh_hash = ?2",
+            params![grant_id, old_hash, new.hash, new.expires_at, now()],
+        )?;
+        Ok(n == 1)
+    }
+
+    pub fn list_grants(&self, profile_id: &str) -> Result<Vec<RemoteGrant>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT g.id, g.profile_id, c.name, g.redirect_uri, g.created_at, g.last_used_at
+             FROM oauth_grants g JOIN oauth_clients c ON c.client_id = g.client_id
+             WHERE g.profile_id = ?1 ORDER BY g.last_used_at DESC",
+        )?;
+        let rows = stmt.query_map([profile_id], |r| {
+            Ok(RemoteGrant {
+                id: r.get(0)?,
+                profile_id: r.get(1)?,
+                client_name: r.get(2)?,
+                redirect_uri: r.get(3)?,
+                created_at: r.get(4)?,
+                last_used_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Deletes a grant; returns its profile id if it existed.
+    pub fn delete_grant(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .db()
+            .query_row(
+                "DELETE FROM oauth_grants WHERE id = ?1 RETURNING profile_id",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+}
+
+/// A dynamically registered OAuth client of the remote endpoint.
+#[derive(Debug, Clone)]
+pub struct OAuthClient {
+    pub client_id: String,
+    pub name: String,
+    pub redirect_uris: Vec<String>,
+    /// SHA-256 of the client secret, for confidential clients.
+    pub secret_hash: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RefreshToken {
+    pub hash: String,
+    pub expires_at: Timestamp,
 }
 
 fn row_to_connection(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Connection>> {

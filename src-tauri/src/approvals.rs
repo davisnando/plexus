@@ -1,4 +1,5 @@
-//! Approval popups: one small always-on-top window per pending tool call.
+//! Approval popups: one small always-on-top window per pending tool call or
+//! remote sign-in.
 
 use std::{
     collections::HashMap,
@@ -6,11 +7,20 @@ use std::{
 };
 
 use futures::future::BoxFuture;
-use plexus_core::{ApprovalBroker, ApprovalDecision, ApprovalRequest};
+use plexus_core::{ApprovalBroker, ApprovalDecision, ApprovalRequest, GrantRequest};
+use serde::Serialize;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::oneshot;
 
-type Pending = HashMap<String, (ApprovalRequest, oneshot::Sender<ApprovalDecision>)>;
+/// What a popup asks about.
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Prompt {
+    Call(ApprovalRequest),
+    Grant(GrantRequest),
+}
+
+type Pending = HashMap<String, (Prompt, oneshot::Sender<ApprovalDecision>)>;
 
 #[derive(Clone)]
 pub struct Approvals {
@@ -26,12 +36,12 @@ impl Approvals {
         }
     }
 
-    pub fn get(&self, id: &str) -> Option<ApprovalRequest> {
+    pub fn get(&self, id: &str) -> Option<Prompt> {
         self.pending
             .lock()
             .unwrap()
             .get(id)
-            .map(|(req, _)| req.clone())
+            .map(|(prompt, _)| prompt.clone())
     }
 
     pub fn resolve(&self, id: &str, decision: ApprovalDecision) {
@@ -39,6 +49,40 @@ impl Approvals {
             let _ = tx.send(decision);
         }
         close_window(&self.app, id);
+    }
+
+    fn open(
+        &self,
+        id: String,
+        prompt: Prompt,
+        title: &str,
+        height: f64,
+    ) -> BoxFuture<'static, ApprovalDecision> {
+        let (tx, rx) = oneshot::channel();
+        self.pending
+            .lock()
+            .unwrap()
+            .insert(id.clone(), (prompt, tx));
+        let url = WebviewUrl::App(format!("index.html#/approval/{id}").into());
+        if let Err(e) = WebviewWindowBuilder::new(&self.app, window_label(&id), url)
+            .title(title)
+            .inner_size(440.0, height)
+            .resizable(false)
+            .always_on_top(true)
+            .center()
+            .focused(true)
+            .build()
+        {
+            tracing::error!("could not open approval window: {e}");
+        }
+        let cleanup = Cleanup {
+            approvals: self.clone(),
+            id,
+        };
+        Box::pin(async move {
+            let _cleanup = cleanup;
+            rx.await.unwrap_or(ApprovalDecision::Deny)
+        })
     }
 }
 
@@ -68,31 +112,16 @@ impl Drop for Cleanup {
 
 impl ApprovalBroker for Approvals {
     fn request(&self, req: ApprovalRequest) -> BoxFuture<'static, ApprovalDecision> {
-        let (tx, rx) = oneshot::channel();
-        let id = req.id.clone();
-        self.pending
-            .lock()
-            .unwrap()
-            .insert(id.clone(), (req, tx));
-        let url = WebviewUrl::App(format!("index.html#/approval/{id}").into());
-        if let Err(e) = WebviewWindowBuilder::new(&self.app, window_label(&id), url)
-            .title("Plexus · Approve tool call")
-            .inner_size(440.0, 420.0)
-            .resizable(false)
-            .always_on_top(true)
-            .center()
-            .focused(true)
-            .build()
-        {
-            tracing::error!("could not open approval window: {e}");
-        }
-        let cleanup = Cleanup {
-            approvals: self.clone(),
-            id,
-        };
-        Box::pin(async move {
-            let _cleanup = cleanup;
-            rx.await.unwrap_or(ApprovalDecision::Deny)
-        })
+        self.open(req.id.clone(), Prompt::Call(req), "Plexus · Approve tool call", 420.0)
+    }
+
+    fn request_grant(&self, req: GrantRequest) -> BoxFuture<'static, bool> {
+        let decision = self.open(
+            req.id.clone(),
+            Prompt::Grant(req),
+            "Plexus · Remote sign-in",
+            340.0,
+        );
+        Box::pin(async move { decision.await != ApprovalDecision::Deny })
     }
 }

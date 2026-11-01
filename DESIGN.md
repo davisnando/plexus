@@ -102,6 +102,27 @@ Profile tokens are cached in memory at startup to avoid a keychain hit per reque
   Tokens are 32 random bytes, base64url, rotatable from the UI.
 - `/oauth/callback` is unauthenticated but only accepts a pending `state`.
 
+## Remote access (tunnel)
+
+- `tunnel.rs` runs `cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:PORT` (quick
+  tunnel, no account). HTTP/2 because quick tunnels default to QUIC on UDP 7844 with no fallback. The status turns
+  `running` on "Registered tunnel connection", not when the URL is first printed. The tunnel follows the server
+  across port changes, and `settings.tunnel_enabled` restores it at launch.
+- A Host guard on the whole router: loopback `Host` without `cf-ray` is local; the tunnel's hostname is remote and
+  limited to `/mcp/*`, `/auth/*`, `/.well-known/*` and `/health`; anything else is 403. rmcp's own Host allowlist
+  is disabled in favour of this.
+- Bearer clients use the profile token over the tunnel unchanged.
+- Web connectors (claude.ai, ChatGPT) use OAuth 2.1 (`remote.rs`). Each profile is an authorization server with
+  issuer `{base}/auth/{slug}`, so the profile is known without relying on the `resource` parameter. 401s carry
+  `WWW-Authenticate: Bearer resource_metadata=…`; metadata is served per RFC 9728 and 8414 (plus OIDC and
+  path-appended aliases). Dynamic client registration accepts https, loopback http or app-scheme redirect URIs and
+  keeps at most 100 clients without grants. The auth code flow requires S256 PKCE. Consent goes through
+  `ApprovalBroker::request_grant`: an always-on-top popup with a 4-digit code that the browser page also shows
+  (the page polls with a meta refresh). It times out after 5 minutes, and at most 3 prompts can be pending.
+- Tokens: 1 h access tokens in memory (a restart forces a refresh); 90-day refresh tokens stored as SHA-256 in
+  `oauth_grants`, rotated and single use. Grants are listed and revocable per profile, and deleting a profile
+  cascades to them.
+
 ## Proxy semantics
 
 **Direct mode.** `tools/list` returns, for every enabled connection in the
@@ -213,7 +234,7 @@ timeout, retention). Approval popup is a separate small always-on-top window.
 
 ## Out of scope for v1
 
-Prompts proxying, sampling/elicitation passthrough, multi-user/remote access,
+Prompts proxying, sampling/elicitation passthrough, multi-user access,
 stderr log viewer, payload logging, Windows/Linux packaging.
 
 ## Pinned versions

@@ -7,13 +7,15 @@ pub mod hub;
 pub mod model;
 pub mod naming;
 pub mod oauth;
+pub mod remote;
 pub mod search;
 pub mod secrets;
 pub mod server;
 pub mod shape;
 pub mod store;
+pub mod tunnel;
 
 pub use hub::{
-    ApprovalBroker, ApprovalDecision, ApprovalRequest, Hub, HubEvent, HubOptions, ReconnectOutcome,
-    UrlOpener,
+    ApprovalBroker, ApprovalDecision, ApprovalRequest, GrantRequest, Hub, HubEvent, HubOptions,
+    ReconnectOutcome, UrlOpener,
 };

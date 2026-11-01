@@ -17,8 +17,8 @@ const connections = [
   { id: 'c5', alias: 'linear', name: 'Linear', template_id: 'linear', transport: { kind: 'http', url: 'https://mcp.linear.app/mcp', auth: 'oauth', headers: {}, secret_headers: [] }, enabled: true, idle_timeout_secs: 600, created_at: now, status: { state: 'needs_auth' }, tool_count: 0, secrets_present: [] },
 ];
 const profiles = [
-  { id: 'p1', slug: 'work', name: 'Work', mode: 'direct', connection_ids: ['c1', 'c2', 'c4'], created_at: now, url: 'http://127.0.0.1:7420/mcp/work' },
-  { id: 'p2', slug: 'side', name: 'Side projects', mode: 'meta', connection_ids: ['c3', 'c4', 'c5'], created_at: now, url: 'http://127.0.0.1:7420/mcp/side' },
+  { id: 'p1', slug: 'work', name: 'Work', mode: 'direct', connection_ids: ['c1', 'c2', 'c4'], created_at: now, url: 'http://127.0.0.1:7420/mcp/work', public_url: 'https://lively-otter-steps-ring.trycloudflare.com/mcp/work' },
+  { id: 'p2', slug: 'side', name: 'Side projects', mode: 'meta', connection_ids: ['c3', 'c4', 'c5'], created_at: now, url: 'http://127.0.0.1:7420/mcp/side', public_url: 'https://lively-otter-steps-ring.trycloudflare.com/mcp/side' },
 ];
 const tools = ['create_issue', 'get_issue', 'search', 'transition_issue', 'add_comment', 'delete_issue'].map((name) => ({
   name, exposed_name: `jira_acme__${name}`, title: null,
@@ -43,8 +43,12 @@ mockIPC(
       case 'connection_tools': return tools;
       case 'profile_token': return 'pXq8w2mZ0rTn4vKs9LbY1cJd6fHa3uEo';
       case 'profile_tools': return tools.map((t, i) => ({ connection_id: 'c1', connection_alias: 'jira_acme', connection_name: 'Jira Acme', tool: t.name, exposed_name: t.exposed_name, description: t.description, policy: i === 5 ? 'approval' : i === 4 ? 'hidden' : 'allow' }));
-      case 'get_settings': return { port: 7420, default_idle_timeout_secs: 600, log_retention_days: 7, approval_timeout_secs: 60 };
-      case 'get_approval': return { id: args.id, profile_name: 'Work', connection_name: 'Jira Acme', connection_alias: 'jira_acme', tool: 'delete_issue', arguments: { issue_key: 'ACME-1432', delete_subtasks: true }, reason: 'Removing the duplicate of ACME-1201 you asked me to clean up.' };
+      case 'get_settings': return { port: 7420, default_idle_timeout_secs: 600, log_retention_days: 7, approval_timeout_secs: 60, tunnel_enabled: true };
+      case 'tunnel_status': return { state: 'running', url: 'https://lively-otter-steps-ring.trycloudflare.com' };
+      case 'remote_grants': return [{ id: 'g1', profile_id: args.profileId, client_name: 'Claude', redirect_uri: 'https://claude.ai/api/mcp/auth_callback', created_at: now - 86400, last_used_at: now - 1200 }];
+      case 'get_approval': return args.id === 'grant'
+        ? { kind: 'grant', id: args.id, profile_name: 'Work', client_name: 'Claude', redirect_host: 'claude.ai', code: '0427', timeout_secs: 300 }
+        : { kind: 'call', id: args.id, profile_name: 'Work', connection_name: 'Jira Acme', connection_alias: 'jira_acme', tool: 'delete_issue', arguments: { issue_key: 'ACME-1432', delete_subtasks: true }, reason: 'Removing the duplicate of ACME-1201 you asked me to clean up.' };
       case 'plugin:autostart|is_enabled': return true;
       default: return null;
     }

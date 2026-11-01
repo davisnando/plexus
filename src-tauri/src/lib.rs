@@ -64,9 +64,35 @@ pub async fn restart_server(app: &AppHandle) {
             }
         }
     };
+    let running = status.running;
     *state.server_info.lock().unwrap() = status.clone();
     let _ = app.emit("server-status", status);
     tray::refresh(app);
+    drop(server);
+
+    // The tunnel points at the port, so it follows the server.
+    let tunnel = state.hub.settings().is_ok_and(|s| s.tunnel_enabled);
+    if running && tunnel {
+        if let Err(e) = state.hub.start_tunnel().await {
+            tracing::warn!("tunnel failed to start: {e:#}");
+        }
+    } else {
+        state.hub.stop_tunnel().await;
+    }
+}
+
+/// Turn the public tunnel on or off and remember the choice.
+pub async fn set_tunnel(app: &AppHandle, enabled: bool) -> anyhow::Result<()> {
+    let hub = &app.state::<AppState>().hub;
+    let mut settings = hub.settings()?;
+    settings.tunnel_enabled = enabled;
+    hub.save_settings(&settings)?;
+    if enabled {
+        hub.start_tunnel().await
+    } else {
+        hub.stop_tunnel().await;
+        Ok(())
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -181,6 +207,10 @@ pub fn run() {
             commands::start_oauth,
             commands::sign_out,
             commands::install_client,
+            commands::tunnel_status,
+            commands::set_tunnel,
+            commands::remote_grants,
+            commands::revoke_grant,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Plexus");

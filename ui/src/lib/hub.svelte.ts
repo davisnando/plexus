@@ -1,5 +1,13 @@
 import { listen } from '@tauri-apps/api/event';
-import { api, type CallLogEntry, type Connection, type HubEvent, type Profile, type ServerStatus } from './api';
+import {
+  api,
+  type CallLogEntry,
+  type Connection,
+  type HubEvent,
+  type Profile,
+  type ServerStatus,
+  type TunnelStatus,
+} from './api';
 
 /** Live mirror of hub state, kept fresh by `hub-event`s from the backend. */
 export const hub = $state({
@@ -7,6 +15,7 @@ export const hub = $state({
   profiles: [] as Profile[],
   calls: [] as CallLogEntry[],
   server: { running: false, port: 7420, error: null } as ServerStatus,
+  tunnel: { state: 'off' } as TunnelStatus,
   loaded: false,
 });
 
@@ -28,6 +37,7 @@ export async function startHub() {
     reloadProfiles(),
     api.recentCalls(200).then((c) => (hub.calls = c)),
     api.serverStatus().then((s) => (hub.server = s)),
+    api.tunnelStatus().then((t) => (hub.tunnel = t)),
   ]);
   hub.loaded = true;
 
@@ -47,6 +57,10 @@ export async function startHub() {
         break;
       case 'call_logged':
         hub.calls = [e.entry, ...hub.calls].slice(0, 500);
+        break;
+      case 'tunnel_status':
+        hub.tunnel = e.status;
+        reloadProfiles();
         break;
     }
   });
