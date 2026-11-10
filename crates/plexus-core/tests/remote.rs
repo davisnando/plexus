@@ -7,7 +7,7 @@ use base64::Engine;
 use futures::future::BoxFuture;
 use plexus_core::{
     ApprovalBroker, ApprovalDecision, ApprovalRequest, GrantRequest, Hub, HubOptions,
-    model::{ConnectionInput, ProfileInput, ProfileMode, Transport},
+    model::{ConnectionInput, Transport},
     secrets::MemorySecrets,
 };
 use reqwest::{StatusCode, header};
@@ -42,7 +42,7 @@ async fn setup(allow: bool) -> (Hub, plexus_core::http::HttpServer) {
     .await
     .unwrap();
     hub.set_approval_broker(Arc::new(Consent(allow)));
-    let c = hub
+    hub
         .create_connection(ConnectionInput {
             alias: "fake".into(),
             name: "Fake".into(),
@@ -55,17 +55,11 @@ async fn setup(allow: bool) -> (Hub, plexus_core::http::HttpServer) {
             },
             enabled: true,
             idle_timeout_secs: None,
+            scope: None,
             secrets: BTreeMap::new(),
         })
         .await
         .unwrap();
-    hub.create_profile(ProfileInput {
-        slug: "work".into(),
-        name: "Work".into(),
-        mode: ProfileMode::Direct,
-        connection_ids: vec![c.id],
-    })
-    .unwrap();
     let server = plexus_core::http::serve(hub.clone(), 0).await.unwrap();
     (hub, server)
 }
@@ -101,7 +95,7 @@ fn form(pairs: &[(&str, &str)]) -> String {
 async fn sign_in(base: &str) -> (String, Result<String, String>, String) {
     let http = http();
 
-    let r = http.post(format!("{base}/mcp/work")).send().await.unwrap();
+    let r = http.post(format!("{base}/mcp")).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     let challenge = r.headers()[header::WWW_AUTHENTICATE].to_str().unwrap().to_string();
     let prm_url = challenge
@@ -110,15 +104,15 @@ async fn sign_in(base: &str) -> (String, Result<String, String>, String) {
         .unwrap()
         .trim_end_matches('"')
         .to_string();
-    assert_eq!(prm_url, format!("{base}/.well-known/oauth-protected-resource/mcp/work"));
+    assert_eq!(prm_url, format!("{base}/.well-known/oauth-protected-resource/mcp"));
 
     let prm = json(http.get(&prm_url).send().await.unwrap()).await;
-    assert_eq!(prm["resource"], format!("{base}/mcp/work"));
+    assert_eq!(prm["resource"], format!("{base}/mcp"));
     let issuer = prm["authorization_servers"][0].as_str().unwrap().to_string();
-    assert_eq!(issuer, format!("{base}/auth/work"));
+    assert_eq!(issuer, format!("{base}/auth/plexus"));
 
     let asm = json(
-        http.get(format!("{base}/.well-known/oauth-authorization-server/auth/work"))
+        http.get(format!("{base}/.well-known/oauth-authorization-server/auth/plexus"))
             .send()
             .await
             .unwrap(),
@@ -147,7 +141,7 @@ async fn sign_in(base: &str) -> (String, Result<String, String>, String) {
         ("state", "xyz"),
         ("code_challenge", &challenge),
         ("code_challenge_method", "S256"),
-        ("resource", &format!("{base}/mcp/work")),
+        ("resource", &format!("{base}/mcp")),
     ]);
     let r = http.get(authorize).send().await.unwrap();
     assert!(r.status().is_redirection());
@@ -176,7 +170,7 @@ async fn web_connector_signs_in_with_oauth_and_calls_tools() {
     let (client_id, code, verifier) = sign_in(&base).await;
     let code = code.unwrap();
     let http = http();
-    let token_url = format!("{base}/auth/work/token");
+    let token_url = format!("{base}/auth/plexus/token");
 
     let bad = http
         .post(&token_url)
@@ -213,13 +207,13 @@ async fn web_connector_signs_in_with_oauth_and_calls_tools() {
     let access = tokens["access_token"].as_str().unwrap().to_string();
     let refresh = tokens["refresh_token"].as_str().unwrap().to_string();
 
-    let profile = hub.profile_by_slug("work").unwrap();
+    let profile = hub.endpoint().unwrap();
     let grants = hub.remote_grants(&profile.id).unwrap();
     assert_eq!(grants.len(), 1);
     assert_eq!(grants[0].client_name, "Test Connector");
 
     let config =
-        StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp/work")).auth_header(&access);
+        StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp")).auth_header(&access);
     let mcp = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
     let tools = mcp.list_all_tools().await.unwrap();
     assert!(tools.iter().any(|t| t.name.starts_with("fake__")));
@@ -239,7 +233,7 @@ async fn web_connector_signs_in_with_oauth_and_calls_tools() {
     )
     .await;
     let access2 = rotated["access_token"].as_str().unwrap().to_string();
-    assert!(hub.authenticate("work", &access2).is_some());
+    assert!(hub.authenticate(None, &access2).is_some());
     // Refresh tokens are single use.
     let reuse = http
         .post(&token_url)
@@ -255,7 +249,7 @@ async fn web_connector_signs_in_with_oauth_and_calls_tools() {
     assert_eq!(reuse.status(), StatusCode::BAD_REQUEST);
 
     hub.revoke_grant(&grants[0].id).unwrap();
-    assert!(hub.authenticate("work", &access2).is_none());
+    assert!(hub.authenticate(None, &access2).is_none());
     assert!(hub.remote_grants(&profile.id).unwrap().is_empty());
     server.shutdown().await;
 }

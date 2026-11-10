@@ -251,6 +251,16 @@ impl Hub {
             None
         };
         let caches = store.load_caches()?;
+        if store.list_profiles()?.is_empty() {
+            store.upsert_profile(&Profile {
+                id: uuid::Uuid::new_v4().to_string(),
+                slug: "plexus".into(),
+                name: "Plexus".into(),
+                mode: ProfileMode::Direct,
+                connection_ids: vec![],
+                created_at: now(),
+            })?;
+        }
         let mut tokens = HashMap::new();
         for p in store.list_profiles()? {
             let key = profile_token_key(&p.id);
@@ -324,22 +334,16 @@ impl Hub {
                 };
                 let Some(inner) = weak.upgrade() else { break };
                 let hub = Hub(inner);
-                let profiles = match hub.list_profiles() {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                let affected: Vec<String> = match &event {
-                    HubEvent::CapabilitiesChanged { connection_id } => profiles
-                        .iter()
-                        .filter(|p| p.connection_ids.contains(connection_id))
-                        .map(|p| p.id.clone())
-                        .collect(),
-                    HubEvent::ConnectionsChanged | HubEvent::ProfilesChanged => {
-                        profiles.iter().map(|p| p.id.clone()).collect()
-                    }
-                    _ => continue,
-                };
-                hub.notify_list_changed(&affected).await;
+                if !matches!(
+                    event,
+                    HubEvent::CapabilitiesChanged { .. }
+                        | HubEvent::ConnectionsChanged
+                        | HubEvent::ProfilesChanged
+                ) {
+                    continue;
+                }
+                let Ok(endpoint) = hub.endpoint() else { continue };
+                hub.notify_list_changed(&[endpoint.id]).await;
             }
         });
     }
@@ -483,6 +487,7 @@ impl Hub {
     pub async fn create_connection(&self, input: ConnectionInput) -> Result<Connection> {
         naming::validate_alias(&input.alias).map_err(|e| anyhow!(e))?;
         self.ensure_alias_free(&input.alias, None)?;
+        validate_scope(input.scope.as_ref())?;
         let idle = match input.idle_timeout_secs {
             Some(s) => s,
             None => self.settings()?.default_idle_timeout_secs,
@@ -495,6 +500,7 @@ impl Hub {
             transport: input.transport,
             enabled: input.enabled,
             idle_timeout_secs: idle,
+            scope: input.scope.unwrap_or_default(),
             created_at: now(),
         };
         self.write_secrets(&connection, &input.secrets)?;
@@ -507,6 +513,7 @@ impl Hub {
     pub async fn update_connection(&self, id: &str, input: ConnectionInput) -> Result<Connection> {
         naming::validate_alias(&input.alias).map_err(|e| anyhow!(e))?;
         self.ensure_alias_free(&input.alias, Some(id))?;
+        validate_scope(input.scope.as_ref())?;
         let old = self.connection(id)?;
         let connection = Connection {
             id: old.id.clone(),
@@ -516,6 +523,7 @@ impl Hub {
             transport: input.transport,
             enabled: input.enabled,
             idle_timeout_secs: input.idle_timeout_secs.unwrap_or(old.idle_timeout_secs),
+            scope: input.scope.unwrap_or_else(|| old.scope.clone()),
             created_at: old.created_at,
         };
         self.write_secrets(&connection, &input.secrets)?;
@@ -641,6 +649,7 @@ impl Hub {
                         transport,
                         enabled: true,
                         idle_timeout_secs: Some(connection.idle_timeout_secs),
+                        scope: None,
                         secrets: Default::default(),
                     },
                 )
@@ -898,62 +907,69 @@ impl Hub {
         Ok(())
     }
 
-    // ---- profiles ----
+    // ---- endpoint ----
 
-    pub fn list_profiles(&self) -> Result<Vec<Profile>> {
+    /// Every profile row: the endpoint first, then legacy aliases.
+    fn profile_rows(&self) -> Result<Vec<Profile>> {
         self.0.store.list_profiles()
     }
 
+    /// The endpoint clients connect to, without a session's connections.
+    pub fn endpoint(&self) -> Result<Profile> {
+        self.profile_rows()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("no endpoint configured"))
+    }
+
+    /// The endpoint as one client session sees it: with the connections whose
+    /// scope matches the folders the client reported (`None`: no folders).
+    pub fn session_profile(&self, roots: Option<&[PathBuf]>) -> Result<Profile> {
+        let mut profile = self.endpoint()?;
+        profile.connection_ids = self
+            .list_connections()?
+            .into_iter()
+            .filter(|c| c.scope.matches(roots))
+            .map(|c| c.id)
+            .collect();
+        Ok(profile)
+    }
+
+    /// The endpoint, as a list for callers that iterate profiles.
+    pub fn list_profiles(&self) -> Result<Vec<Profile>> {
+        Ok(vec![self.endpoint()?])
+    }
+
+    /// Profiles from before folder routing whose `/mcp/{slug}` URL and token
+    /// still work as aliases of the endpoint.
+    pub fn legacy_endpoints(&self) -> Result<Vec<Profile>> {
+        Ok(self.profile_rows()?.into_iter().skip(1).collect())
+    }
+
     pub fn profile(&self, id: &str) -> Result<Profile> {
-        self.list_profiles()?
+        self.profile_rows()?
             .into_iter()
             .find(|p| p.id == id)
             .ok_or_else(|| anyhow!("profile {id} not found"))
     }
 
-    pub fn create_profile(&self, input: ProfileInput) -> Result<Profile> {
-        naming::validate_slug(&input.slug).map_err(|e| anyhow!(e))?;
-        if self.list_profiles()?.iter().any(|p| p.slug == input.slug) {
-            bail!("a profile with slug `{}` already exists", input.slug);
-        }
-        let profile = Profile {
-            id: uuid::Uuid::new_v4().to_string(),
-            slug: input.slug,
-            name: input.name,
-            mode: input.mode,
-            connection_ids: input.connection_ids,
-            created_at: now(),
-        };
-        self.0.store.upsert_profile(&profile)?;
-        let token = generate_token();
-        self.0
-            .secrets
-            .set(&profile_token_key(&profile.id), &token)?;
-        self.0
-            .tokens
-            .write()
-            .unwrap()
-            .insert(profile.slug.clone(), (profile.id.clone(), token));
-        self.emit(HubEvent::ProfilesChanged);
-        Ok(profile)
-    }
-
+    /// Renames the endpoint or changes how it offers tools.
     pub fn update_profile(&self, id: &str, input: ProfileInput) -> Result<Profile> {
         naming::validate_slug(&input.slug).map_err(|e| anyhow!(e))?;
         let old = self.profile(id)?;
         if self
-            .list_profiles()?
+            .profile_rows()?
             .iter()
             .any(|p| p.slug == input.slug && p.id != id)
         {
-            bail!("a profile with slug `{}` already exists", input.slug);
+            bail!("the URL slug `{}` is already in use", input.slug);
         }
         let profile = Profile {
             id: old.id.clone(),
             slug: input.slug,
             name: input.name,
             mode: input.mode,
-            connection_ids: input.connection_ids,
+            connection_ids: vec![],
             created_at: old.created_at,
         };
         self.0.store.upsert_profile(&profile)?;
@@ -967,8 +983,12 @@ impl Hub {
         Ok(profile)
     }
 
-    pub fn delete_profile(&self, id: &str) -> Result<()> {
+    /// Removes a legacy alias; clients still using its URL or token are cut off.
+    pub fn delete_legacy_endpoint(&self, id: &str) -> Result<()> {
         let profile = self.profile(id)?;
+        if profile.id == self.endpoint()?.id {
+            bail!("the endpoint itself cannot be deleted");
+        }
         self.0.store.delete_profile(id)?;
         self.0.secrets.delete(&profile_token_key(id))?;
         self.0.tokens.write().unwrap().remove(&profile.slug);
@@ -999,26 +1019,32 @@ impl Hub {
         Ok(token)
     }
 
-    /// Checks the profile token (constant time) or an OAuth access token
-    /// issued for the profile; returns the profile id on success.
-    pub fn authenticate(&self, slug: &str, token: &str) -> Option<String> {
+    /// Checks a bearer token for `/mcp` (`slug: None`) or a legacy
+    /// `/mcp/{slug}` URL: the endpoint token, a legacy alias's own token, or an
+    /// OAuth access token. Returns the endpoint id on success.
+    pub fn authenticate(&self, slug: Option<&str>, token: &str) -> Option<String> {
         use subtle::ConstantTimeEq;
-        let id = {
+        let endpoint = self.endpoint().ok()?;
+        let valid = {
             let tokens = self.0.tokens.read().unwrap();
-            let (id, expected) = tokens.get(slug)?;
-            if bool::from(expected.as_bytes().ct_eq(token.as_bytes())) {
-                return Some(id.clone());
+            let check = |slug: &str| {
+                tokens
+                    .get(slug)
+                    .is_some_and(|(_, expected)| bool::from(expected.as_bytes().ct_eq(token.as_bytes())))
+            };
+            match slug {
+                Some(slug) if !tokens.contains_key(slug) => return None,
+                Some(slug) => check(slug),
+                None => check(&endpoint.slug),
             }
-            id.clone()
         };
-        self.0.remote.check_access_token(&id, token).then_some(id)
+        (valid || self.0.remote.check_access_token(&endpoint.id, token)).then_some(endpoint.id)
     }
 
+    /// The endpoint, if `slug` is its slug or a legacy alias's.
     pub fn profile_by_slug(&self, slug: &str) -> Option<Profile> {
-        self.list_profiles()
-            .ok()?
-            .into_iter()
-            .find(|p| p.slug == slug)
+        let rows = self.profile_rows().ok()?;
+        rows.iter().any(|p| p.slug == slug).then(|| rows[0].clone())
     }
 
     pub fn tool_policies(&self, profile_id: &str) -> Result<HashMap<(String, String), ToolPolicy>> {
@@ -1341,6 +1367,15 @@ impl Hub {
     pub(crate) fn tunnel(&self) -> &crate::tunnel::Tunnel {
         &self.0.tunnel
     }
+}
+
+fn validate_scope(scope: Option<&Scope>) -> Result<()> {
+    if let Some(Scope::Folders { folders }) = scope {
+        for rule in folders {
+            crate::folders::validate_rule(rule).map_err(|e| anyhow!(e))?;
+        }
+    }
+    Ok(())
 }
 
 fn initial_status(c: &Connection) -> ConnectionStatus {

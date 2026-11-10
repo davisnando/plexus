@@ -1,7 +1,9 @@
 //! Plexus core: a local hub that aggregates many MCP servers behind
-//! per-profile MCP endpoints. Has no desktop/UI dependencies.
+//! one MCP endpoint, routing connections by the folder the client works in.
+//! Has no desktop/UI dependencies.
 
 pub mod clients;
+pub mod folders;
 pub mod http;
 pub mod hub;
 pub mod model;

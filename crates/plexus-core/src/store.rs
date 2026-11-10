@@ -72,6 +72,27 @@ CREATE TABLE oauth_grants (
     created_at INTEGER NOT NULL,
     last_used_at INTEGER NOT NULL
 );
+"#, r#"
+-- Folder routing: one endpoint (the oldest profile), connections scoped by folder.
+-- Connections routed into any profile stay available everywhere; the rest were
+-- not exposed anywhere and get an empty folder list, which keeps it that way.
+ALTER TABLE connections ADD COLUMN scope TEXT NOT NULL DEFAULT '{"kind":"everywhere"}';
+UPDATE connections SET scope = '{"kind":"folders","folders":[]}'
+    WHERE EXISTS (SELECT 1 FROM profiles)
+    AND id NOT IN (SELECT connection_id FROM profile_connections);
+-- Tool policies merge into the endpoint; the strictest one per tool wins.
+CREATE TEMP TABLE merged_policies AS
+    SELECT connection_id, tool,
+        MAX(CASE policy WHEN 'hidden' THEN 2 WHEN 'approval' THEN 1 ELSE 0 END) AS level
+    FROM tool_policies GROUP BY connection_id, tool;
+DELETE FROM tool_policies;
+INSERT INTO tool_policies (profile_id, connection_id, tool, policy)
+    SELECT (SELECT id FROM profiles ORDER BY created_at, id LIMIT 1), connection_id, tool,
+        CASE level WHEN 2 THEN 'hidden' ELSE 'approval' END
+    FROM merged_policies WHERE level > 0;
+DROP TABLE merged_policies;
+UPDATE oauth_grants SET profile_id = (SELECT id FROM profiles ORDER BY created_at, id LIMIT 1);
+DELETE FROM profile_connections;
 "#];
 
 /// SQLite-backed persistence for everything except secrets.
@@ -89,6 +110,15 @@ pub struct CapabilityCache {
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Db::open(path).with_context(|| format!("open {}", path.display()))?;
+        // Folder routing (migration 3) folds profiles into one endpoint; keep a copy.
+        let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if (1..3).contains(&version) {
+            let backup = path.with_extension("db.before-folder-routing");
+            if !backup.exists() {
+                db.execute("VACUUM INTO ?1", [backup.to_string_lossy()])
+                    .with_context(|| format!("back up {}", path.display()))?;
+            }
+        }
         Self::init(db)
     }
 
@@ -117,7 +147,7 @@ impl Store {
     pub fn list_connections(&self) -> Result<Vec<Connection>> {
         let db = self.db();
         let mut stmt = db.prepare(
-            "SELECT id, alias, name, template_id, transport, enabled, idle_timeout_secs, created_at
+            "SELECT id, alias, name, template_id, transport, enabled, idle_timeout_secs, created_at, scope
              FROM connections ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], row_to_connection)?;
@@ -128,7 +158,7 @@ impl Store {
         let db = self.db();
         let row = db
             .query_row(
-                "SELECT id, alias, name, template_id, transport, enabled, idle_timeout_secs, created_at
+                "SELECT id, alias, name, template_id, transport, enabled, idle_timeout_secs, created_at, scope
                  FROM connections WHERE id = ?1",
                 [id],
                 row_to_connection,
@@ -139,8 +169,8 @@ impl Store {
 
     pub fn insert_connection(&self, c: &Connection) -> Result<()> {
         self.db().execute(
-            "INSERT INTO connections (id, alias, name, template_id, transport, enabled, idle_timeout_secs, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO connections (id, alias, name, template_id, transport, enabled, idle_timeout_secs, created_at, scope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 c.id,
                 c.alias,
@@ -149,7 +179,8 @@ impl Store {
                 serde_json::to_string(&c.transport)?,
                 c.enabled,
                 c.idle_timeout_secs as i64,
-                c.created_at
+                c.created_at,
+                serde_json::to_string(&c.scope)?
             ],
         )?;
         Ok(())
@@ -158,7 +189,7 @@ impl Store {
     pub fn update_connection(&self, c: &Connection) -> Result<()> {
         self.db().execute(
             "UPDATE connections SET alias = ?2, name = ?3, template_id = ?4, transport = ?5,
-             enabled = ?6, idle_timeout_secs = ?7 WHERE id = ?1",
+             enabled = ?6, idle_timeout_secs = ?7, scope = ?8 WHERE id = ?1",
             params![
                 c.id,
                 c.alias,
@@ -166,7 +197,8 @@ impl Store {
                 c.template_id,
                 serde_json::to_string(&c.transport)?,
                 c.enabled,
-                c.idle_timeout_secs as i64
+                c.idle_timeout_secs as i64,
+                serde_json::to_string(&c.scope)?
             ],
         )?;
         Ok(())
@@ -227,8 +259,8 @@ impl Store {
     pub fn list_profiles(&self) -> Result<Vec<Profile>> {
         let db = self.db();
         let mut stmt =
-            db.prepare("SELECT id, slug, name, mode, created_at FROM profiles ORDER BY created_at")?;
-        let mut profiles = stmt
+            db.prepare("SELECT id, slug, name, mode, created_at FROM profiles ORDER BY created_at, id")?;
+        let profiles = stmt
             .query_map([], |r| {
                 Ok(Profile {
                     id: r.get(0)?,
@@ -240,40 +272,15 @@ impl Store {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut stmt = db.prepare(
-            "SELECT pc.profile_id, pc.connection_id FROM profile_connections pc
-             JOIN connections c ON c.id = pc.connection_id ORDER BY c.created_at",
-        )?;
-        let links = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (profile_id, connection_id) in links {
-            if let Some(p) = profiles.iter_mut().find(|p| p.id == profile_id) {
-                p.connection_ids.push(connection_id);
-            }
-        }
         Ok(profiles)
     }
 
     pub fn upsert_profile(&self, p: &Profile) -> Result<()> {
-        let mut db = self.db();
-        let tx = db.transaction()?;
-        tx.execute(
+        self.db().execute(
             "INSERT INTO profiles (id, slug, name, mode, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO UPDATE SET slug = ?2, name = ?3, mode = ?4",
             params![p.id, p.slug, p.name, p.mode.as_str(), p.created_at],
         )?;
-        tx.execute(
-            "DELETE FROM profile_connections WHERE profile_id = ?1",
-            [&p.id],
-        )?;
-        for cid in &p.connection_ids {
-            tx.execute(
-                "INSERT INTO profile_connections (profile_id, connection_id) VALUES (?1, ?2)",
-                params![p.id, cid],
-            )?;
-        }
-        tx.commit()?;
         Ok(())
     }
 
@@ -544,6 +551,8 @@ fn row_to_connection(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Connectio
     let enabled = r.get(5)?;
     let idle_timeout_secs = r.get::<_, i64>(6)? as u64;
     let created_at = r.get(7)?;
+    let scope: String = r.get(8)?;
+    let scope = serde_json::from_str(&scope).unwrap_or_default();
     Ok(serde_json::from_str(&transport)
         .with_context(|| format!("decode transport of connection {id}"))
         .map(|transport| Connection {
@@ -554,6 +563,53 @@ fn row_to_connection(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Connectio
             transport,
             enabled,
             idle_timeout_secs,
+            scope,
             created_at,
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A database from before folder routing: two profiles, one connection in
+    /// both, one in neither, conflicting policies and a grant on the newer profile.
+    #[test]
+    fn migrates_profiles_into_one_endpoint() {
+        let db = Db::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..2] {
+            db.execute_batch(sql).unwrap();
+        }
+        db.pragma_update(None, "user_version", 2).unwrap();
+        db.execute_batch(
+            r#"
+            INSERT INTO connections (id, alias, name, transport, idle_timeout_secs, created_at)
+                VALUES ('c1', 'jira', 'Jira', '{"kind":"http","url":"https://x"}', 600, 1),
+                       ('c2', 'unused', 'Unused', '{"kind":"http","url":"https://y"}', 600, 2);
+            INSERT INTO profiles (id, slug, name, mode, created_at)
+                VALUES ('old', 'work', 'Work', 'meta', 1), ('new', 'side', 'Side', 'direct', 2);
+            INSERT INTO profile_connections VALUES ('old', 'c1'), ('new', 'c1');
+            INSERT INTO tool_policies VALUES
+                ('old', 'c1', 'delete', 'approval'), ('new', 'c1', 'delete', 'hidden'),
+                ('new', 'c1', 'search', 'approval');
+            INSERT INTO oauth_clients (client_id, name, redirect_uris, created_at)
+                VALUES ('cl', 'claude.ai', '[]', 1);
+            INSERT INTO oauth_grants VALUES ('g', 'new', 'cl', 'https://claude.ai', 'h', 9, 1, 1);
+            "#,
+        )
+        .unwrap();
+        let store = Store::init(db).unwrap();
+
+        let profiles = store.list_profiles().unwrap();
+        assert_eq!(profiles[0].id, "old", "the oldest profile becomes the endpoint");
+        assert_eq!(profiles[0].mode, ProfileMode::Meta);
+        let scope = |id| store.get_connection(id).unwrap().unwrap().scope;
+        assert_eq!(scope("c1"), Scope::Everywhere);
+        assert_eq!(scope("c2"), Scope::Folders { folders: vec![] });
+        let policies = store.tool_policies("old").unwrap();
+        assert_eq!(policies[&("c1".into(), "delete".into())], ToolPolicy::Hidden);
+        assert_eq!(policies[&("c1".into(), "search".into())], ToolPolicy::Approval);
+        assert!(store.tool_policies("new").unwrap().is_empty());
+        assert_eq!(store.list_grants("old").unwrap().len(), 1);
+    }
 }

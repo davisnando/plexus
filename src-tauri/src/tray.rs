@@ -99,27 +99,20 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
 
-    let profiles = state.hub.list_profiles().unwrap_or_default();
-    let copy = Submenu::new(app, "Copy Endpoint URL", !profiles.is_empty())?;
-    for p in &profiles {
-        copy.append(&MenuItem::with_id(
+    if matches!(tunnel, TunnelStatus::Running { .. }) {
+        let copy = Submenu::new(app, "Copy Endpoint URL", true)?;
+        copy.append(&MenuItem::with_id(app, "copy", "Local", true, None::<&str>)?)?;
+        copy.append(&MenuItem::with_id(app, "copy-public", "Public", true, None::<&str>)?)?;
+        menu.append(&copy)?;
+    } else {
+        menu.append(&MenuItem::with_id(
             app,
-            format!("copy:{}", p.slug),
-            format!("{}  ({})", p.name, p.slug),
+            "copy",
+            "Copy Endpoint URL",
             true,
             None::<&str>,
         )?)?;
-        if matches!(tunnel, TunnelStatus::Running { .. }) {
-            copy.append(&MenuItem::with_id(
-                app,
-                format!("copy-public:{}", p.slug),
-                format!("{}  (public)", p.name),
-                true,
-                None::<&str>,
-            )?)?;
-        }
     }
-    menu.append(&copy)?;
     menu.append(&MenuItem::with_id(
         app,
         "add",
@@ -151,6 +144,15 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         "open" => show_dashboard(app, None),
         "add" => show_dashboard(app, Some("/connections/new")),
         "quit" => app.exit(0),
+        "copy" => {
+            let url = app.state::<AppState>().endpoint_url();
+            let _ = app.clipboard().write_text(url);
+        }
+        "copy-public" => {
+            if let Some(base) = app.state::<AppState>().hub.public_url() {
+                let _ = app.clipboard().write_text(format!("{base}/mcp"));
+            }
+        }
         "tunnel" => {
             let app = app.clone();
             let enable = !matches!(
@@ -166,13 +168,6 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         _ => {
             if let Some(conn) = id.strip_prefix("conn:") {
                 show_dashboard(app, Some(&format!("/connections/{conn}")));
-            } else if let Some(slug) = id.strip_prefix("copy:") {
-                let url = app.state::<AppState>().profile_url(slug);
-                let _ = app.clipboard().write_text(url);
-            } else if let Some(slug) = id.strip_prefix("copy-public:")
-                && let Some(base) = app.state::<AppState>().hub.public_url()
-            {
-                let _ = app.clipboard().write_text(format!("{base}/mcp/{slug}"));
             }
         }
     }

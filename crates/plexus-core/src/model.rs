@@ -75,6 +75,35 @@ pub enum HttpAuth {
     Oauth,
 }
 
+/// Which client sessions get a connection, by the folders the client works in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Scope {
+    /// Every session, including clients that report no folder.
+    #[default]
+    Everywhere,
+    /// Only sessions whose client works in a folder matching one of these rules
+    /// (see [`crate::folders`]). No rules means no session.
+    Folders {
+        #[serde(default)]
+        folders: Vec<String>,
+    },
+}
+
+impl Scope {
+    /// `roots` is `None` when the client reports no folders at all.
+    pub fn matches(&self, roots: Option<&[std::path::PathBuf]>) -> bool {
+        match self {
+            Scope::Everywhere => true,
+            Scope::Folders { folders } => roots.is_some_and(|roots| {
+                roots
+                    .iter()
+                    .any(|root| folders.iter().any(|rule| crate::folders::rule_matches(rule, root)))
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Connection {
     pub id: String,
@@ -85,6 +114,8 @@ pub struct Connection {
     pub transport: Transport,
     pub enabled: bool,
     pub idle_timeout_secs: u64,
+    #[serde(default)]
+    pub scope: Scope,
     pub created_at: Timestamp,
 }
 
@@ -102,6 +133,9 @@ pub struct ConnectionInput {
     pub enabled: bool,
     #[serde(default)]
     pub idle_timeout_secs: Option<u64>,
+    /// Omitted keeps the current scope; new connections default to everywhere.
+    #[serde(default)]
+    pub scope: Option<Scope>,
     #[serde(default)]
     pub secrets: BTreeMap<String, String>,
 }
@@ -136,13 +170,19 @@ impl ProfileMode {
     }
 }
 
+/// The endpoint clients connect to. There is one: the oldest profile row.
+/// Rows from before folder routing stay as legacy aliases, so their
+/// `/mcp/{slug}` URLs and tokens keep working, but they serve the same tools.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
     pub id: String,
-    /// URL segment: `/mcp/{slug}`.
+    /// URL segment of the legacy `/mcp/{slug}` URL and the OAuth issuer `/auth/{slug}`.
     pub slug: String,
     pub name: String,
     pub mode: ProfileMode,
+    /// Connections this session may use: filled in per client session from
+    /// the connections' scopes. Empty outside a session.
+    #[serde(default)]
     pub connection_ids: Vec<String>,
     pub created_at: Timestamp,
 }
@@ -153,8 +193,6 @@ pub struct ProfileInput {
     pub name: String,
     #[serde(default)]
     pub mode: ProfileMode,
-    #[serde(default)]
-    pub connection_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

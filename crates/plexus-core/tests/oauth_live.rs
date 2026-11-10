@@ -36,6 +36,7 @@ async fn oauth_flow_reaches_browser_step() {
                 },
                 enabled: true,
                 idle_timeout_secs: None,
+                scope: None,
                 secrets: BTreeMap::new(),
             })
             .await
@@ -78,6 +79,7 @@ async fn unauthenticated_remote_reports_needs_auth() {
             },
             enabled: true,
             idle_timeout_secs: None,
+            scope: None,
             secrets: BTreeMap::new(),
         })
         .await

@@ -122,15 +122,13 @@ pub struct ProfileView {
 
 fn profile_view(state: &AppState, profile: Profile) -> ProfileView {
     ProfileView {
-        url: state.profile_url(&profile.slug),
-        public_url: state
-            .hub
-            .public_url()
-            .map(|base| format!("{base}/mcp/{}", profile.slug)),
+        url: state.endpoint_url(),
+        public_url: state.hub.public_url().map(|base| format!("{base}/mcp")),
         profile,
     }
 }
 
+/// The endpoint, as a one-element list.
 #[tauri::command]
 pub fn list_profiles(state: State<'_, AppState>) -> CmdResult<Vec<ProfileView>> {
     Ok(state
@@ -143,12 +141,6 @@ pub fn list_profiles(state: State<'_, AppState>) -> CmdResult<Vec<ProfileView>> 
 }
 
 #[tauri::command]
-pub fn create_profile(state: State<'_, AppState>, input: ProfileInput) -> CmdResult<ProfileView> {
-    let p = state.hub.create_profile(input).map_err(err)?;
-    Ok(profile_view(&state, p))
-}
-
-#[tauri::command]
 pub fn update_profile(
     state: State<'_, AppState>,
     id: String,
@@ -158,9 +150,32 @@ pub fn update_profile(
     Ok(profile_view(&state, p))
 }
 
+#[derive(Serialize)]
+pub struct LegacyEndpointView {
+    id: String,
+    name: String,
+    url: String,
+}
+
+/// Old per-profile URLs that still work as aliases of the endpoint.
 #[tauri::command]
-pub fn delete_profile(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    state.hub.delete_profile(&id).map_err(err)
+pub fn legacy_endpoints(state: State<'_, AppState>) -> CmdResult<Vec<LegacyEndpointView>> {
+    Ok(state
+        .hub
+        .legacy_endpoints()
+        .map_err(err)?
+        .into_iter()
+        .map(|p| LegacyEndpointView {
+            url: state.legacy_url(&p.slug),
+            id: p.id,
+            name: p.name,
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn delete_legacy_endpoint(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.hub.delete_legacy_endpoint(&id).map_err(err)
 }
 
 #[tauri::command]
@@ -184,16 +199,12 @@ pub struct ProfileToolView {
     policy: ToolPolicy,
 }
 
-/// Every tool of every connection in the profile, including hidden ones.
+/// Every tool of every connection, including hidden ones.
 #[tauri::command]
 pub fn profile_tools(state: State<'_, AppState>, id: String) -> CmdResult<Vec<ProfileToolView>> {
-    let profile = state.hub.profile(&id).map_err(err)?;
     let policies = state.hub.tool_policies(&id).map_err(err)?;
     let mut out = vec![];
     for c in state.hub.list_connections().map_err(err)? {
-        if !profile.connection_ids.contains(&c.id) {
-            continue;
-        }
         for t in state.hub.tools(&c.id) {
             out.push(ProfileToolView {
                 policy: policies
@@ -303,17 +314,21 @@ pub async fn install_client(
     profile_id: String,
     client: plexus_core::clients::Client,
 ) -> CmdResult<String> {
-    let profile = state.hub.profile(&profile_id).map_err(err)?;
     let token = state.hub.profile_token(&profile_id).map_err(err)?;
-    let url = state.profile_url(&profile.slug);
+    let url = state.endpoint_url();
+    // Entries for the old per-profile URLs, including the endpoint's own.
+    let legacy_slugs: Vec<String> = std::iter::once(state.hub.endpoint().map_err(err)?)
+        .chain(state.hub.legacy_endpoints().map_err(err)?)
+        .map(|p| p.slug)
+        .collect();
     let shell_path = state.hub.shell_path().map(String::from);
     tauri::async_runtime::spawn_blocking(move || {
         plexus_core::clients::install(
             client,
             &plexus_core::clients::Endpoint {
-                slug: &profile.slug,
                 url: &url,
                 token: &token,
+                legacy_slugs: &legacy_slugs,
             },
             shell_path.as_deref(),
         )

@@ -8,6 +8,7 @@
     "core:window:allow-start-dragging",
     "autostart:default",
     "clipboard-manager:allow-write-text",
-    "opener:default"
+    "opener:default",
+    "dialog:allow-open"
   ]
 }

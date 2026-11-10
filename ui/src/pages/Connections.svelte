@@ -1,7 +1,7 @@
 <script lang="ts">
   import { hub } from '../lib/hub.svelte';
   import { catalog } from '../lib/catalog';
-  import { transportSummary } from '../lib/format';
+  import { scopeLabel, transportSummary } from '../lib/format';
   import StatusDot from '../lib/StatusDot.svelte';
 
   // Group instances of the same service so "3 × Jira" reads as one family.
@@ -17,8 +17,6 @@
       items,
     }));
   });
-
-  const profileCount = (id: string) => hub.profiles.filter((p) => p.connection_ids.includes(id)).length;
 </script>
 
 <header class="flex items-end justify-between pb-6 pt-2">
@@ -66,8 +64,8 @@
                 </div>
                 <div class="flex items-center gap-5 text-[12px] text-muted tabular-nums">
                   <span>{c.tool_count} tools</span>
-                  <span class="w-[72px] text-right">
-                    {#if profileCount(c.id)}in {profileCount(c.id)} profile{profileCount(c.id) > 1 ? 's' : ''}{:else}<span class="text-warn">no profile</span>{/if}
+                  <span class="w-[84px] text-right {c.scope.kind === 'folders' && !c.scope.folders.length ? 'text-warn' : ''}">
+                    {scopeLabel(c.scope)}
                   </span>
                 </div>
               </a>

@@ -10,16 +10,16 @@ const stdio = (command: string, args: string[], env: Record<string, string> = {}
   kind: 'stdio', command, args, env, secret_env,
 });
 const connections = [
-  { id: 'c1', alias: 'jira_acme', name: 'Jira Acme', template_id: 'jira-token', transport: stdio('uvx', ['mcp-atlassian'], { JIRA_URL: 'https://acme.atlassian.net' }, ['JIRA_API_TOKEN']), enabled: true, idle_timeout_secs: 600, created_at: now, status: { state: 'running' }, tool_count: 31, secrets_present: ['env:JIRA_API_TOKEN'] },
-  { id: 'c2', alias: 'jira_client', name: 'Jira Client Co', template_id: 'jira-token', transport: stdio('uvx', ['mcp-atlassian'], { JIRA_URL: 'https://clientco.atlassian.net' }, ['JIRA_API_TOKEN']), enabled: true, idle_timeout_secs: 600, created_at: now, status: { state: 'idle' }, tool_count: 31, secrets_present: ['env:JIRA_API_TOKEN'] },
-  { id: 'c3', alias: 'jira_oss', name: 'Jira OSS', template_id: 'jira-token', transport: stdio('uvx', ['mcp-atlassian'], { JIRA_URL: 'https://oss.atlassian.net' }, ['JIRA_API_TOKEN']), enabled: true, idle_timeout_secs: 600, created_at: now, status: { state: 'error', message: 'secret env `JIRA_API_TOKEN` is not set' }, tool_count: 0, secrets_present: [] },
-  { id: 'c4', alias: 'sentry_prod', name: 'Sentry Production', template_id: 'sentry-token', transport: stdio('npx', ['-y', '@sentry/mcp-server@latest'], {}, ['SENTRY_ACCESS_TOKEN']), enabled: true, idle_timeout_secs: 600, created_at: now, status: { state: 'running' }, tool_count: 18, secrets_present: ['env:SENTRY_ACCESS_TOKEN'] },
-  { id: 'c5', alias: 'linear', name: 'Linear', template_id: 'linear', transport: { kind: 'http', url: 'https://mcp.linear.app/mcp', auth: 'oauth', headers: {}, secret_headers: [] }, enabled: true, idle_timeout_secs: 600, created_at: now, status: { state: 'needs_auth' }, tool_count: 0, secrets_present: [] },
+  { id: 'c1', alias: 'jira_acme', name: 'Jira Acme', template_id: 'jira-token', transport: stdio('uvx', ['mcp-atlassian'], { JIRA_URL: 'https://acme.atlassian.net' }, ['JIRA_API_TOKEN']), enabled: true, idle_timeout_secs: 600, scope: { kind: 'folders', folders: ['/Users/you/work/acme', '/Users/you/work/acme-*'] }, created_at: now, status: { state: 'running' }, tool_count: 31, secrets_present: ['env:JIRA_API_TOKEN'] },
+  { id: 'c2', alias: 'jira_client', name: 'Jira Client Co', template_id: 'jira-token', transport: stdio('uvx', ['mcp-atlassian'], { JIRA_URL: 'https://clientco.atlassian.net' }, ['JIRA_API_TOKEN']), enabled: true, idle_timeout_secs: 600, scope: { kind: 'folders', folders: ['/Users/you/work/clientco/*'] }, created_at: now, status: { state: 'idle' }, tool_count: 31, secrets_present: ['env:JIRA_API_TOKEN'] },
+  { id: 'c3', alias: 'jira_oss', name: 'Jira OSS', template_id: 'jira-token', transport: stdio('uvx', ['mcp-atlassian'], { JIRA_URL: 'https://oss.atlassian.net' }, ['JIRA_API_TOKEN']), enabled: true, idle_timeout_secs: 600, scope: { kind: 'folders', folders: [] }, created_at: now, status: { state: 'error', message: 'secret env `JIRA_API_TOKEN` is not set' }, tool_count: 0, secrets_present: [] },
+  { id: 'c4', alias: 'sentry_prod', name: 'Sentry Production', template_id: 'sentry-token', transport: stdio('npx', ['-y', '@sentry/mcp-server@latest'], {}, ['SENTRY_ACCESS_TOKEN']), enabled: true, idle_timeout_secs: 600, scope: { kind: 'everywhere' }, created_at: now, status: { state: 'running' }, tool_count: 18, secrets_present: ['env:SENTRY_ACCESS_TOKEN'] },
+  { id: 'c5', alias: 'linear', name: 'Linear', template_id: 'linear', transport: { kind: 'http', url: 'https://mcp.linear.app/mcp', auth: 'oauth', headers: {}, secret_headers: [] }, enabled: true, idle_timeout_secs: 600, scope: { kind: 'everywhere' }, created_at: now, status: { state: 'needs_auth' }, tool_count: 0, secrets_present: [] },
 ];
 const profiles = [
-  { id: 'p1', slug: 'work', name: 'Work', mode: 'direct', connection_ids: ['c1', 'c2', 'c4'], created_at: now, url: 'http://127.0.0.1:7420/mcp/work', public_url: 'https://lively-otter-steps-ring.trycloudflare.com/mcp/work' },
-  { id: 'p2', slug: 'side', name: 'Side projects', mode: 'meta', connection_ids: ['c3', 'c4', 'c5'], created_at: now, url: 'http://127.0.0.1:7420/mcp/side', public_url: 'https://lively-otter-steps-ring.trycloudflare.com/mcp/side' },
+  { id: 'p1', slug: 'work', name: 'Work', mode: 'direct', created_at: now, url: 'http://127.0.0.1:7420/mcp', public_url: 'https://lively-otter-steps-ring.trycloudflare.com/mcp' },
 ];
+const legacy = [{ id: 'p2', name: 'Side projects', url: 'http://127.0.0.1:7420/mcp/side' }];
 const tools = ['create_issue', 'get_issue', 'search', 'transition_issue', 'add_comment', 'delete_issue'].map((name) => ({
   name, exposed_name: `jira_acme__${name}`, title: null,
   description: `Jira: ${name.replace(/_/g, ' ')} in the configured site.`,
@@ -38,6 +38,7 @@ mockIPC(
     switch (cmd) {
       case 'list_connections': return connections;
       case 'list_profiles': return profiles;
+      case 'legacy_endpoints': return legacy;
       case 'recent_calls': return calls;
       case 'server_status': return { running: true, port: 7420, error: null };
       case 'connection_tools': return tools;

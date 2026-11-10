@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use futures::future::BoxFuture;
 use plexus_core::{
     ApprovalBroker, ApprovalDecision, ApprovalRequest, Hub, HubOptions,
-    model::{CallStatus, ConnectionInput, ProfileInput, ProfileMode, ToolPolicy, Transport},
+    model::{CallStatus, ConnectionInput, Profile, ProfileInput, ProfileMode, ToolPolicy, Transport},
     secrets::MemorySecrets,
 };
 use rmcp::{
@@ -38,14 +38,26 @@ fn fake(env: &[(&str, &str)], secret_env: &[&str]) -> Transport {
     }
 }
 
-async fn client(port: u16, slug: &str, token: &str) -> RunningService<rmcp::RoleClient, ()> {
-    let config = StreamableHttpClientTransportConfig::with_uri(format!(
-        "http://127.0.0.1:{port}/mcp/{slug}"
-    ))
-    .auth_header(token);
+async fn client(port: u16, token: &str) -> RunningService<rmcp::RoleClient, ()> {
+    let config =
+        StreamableHttpClientTransportConfig::with_uri(format!("http://127.0.0.1:{port}/mcp"))
+            .auth_header(token);
     ().serve(StreamableHttpClientTransport::from_config(config))
         .await
         .unwrap()
+}
+
+fn set_mode(hub: &Hub, mode: ProfileMode) -> Profile {
+    let e = hub.endpoint().unwrap();
+    hub.update_profile(
+        &e.id,
+        ProfileInput {
+            slug: e.slug.clone(),
+            name: e.name.clone(),
+            mode,
+        },
+    )
+    .unwrap()
 }
 
 fn text(r: &CallToolResult) -> String {
@@ -70,6 +82,7 @@ async fn aggregates_two_instances_of_the_same_server() {
             transport: fake(&[("FAKE_NAME", "alpha")], &[]),
             enabled: true,
             idle_timeout_secs: None,
+            scope: None,
             secrets: BTreeMap::new(),
         })
         .await
@@ -82,33 +95,20 @@ async fn aggregates_two_instances_of_the_same_server() {
             transport: fake(&[], &["FAKE_NAME"]),
             enabled: true,
             idle_timeout_secs: None,
+            scope: None,
             secrets: BTreeMap::from([("env:FAKE_NAME".into(), "bravo".into())]),
         })
         .await
         .unwrap();
-    let work = hub
-        .create_profile(ProfileInput {
-            slug: "work".into(),
-            name: "Work".into(),
-            mode: ProfileMode::Direct,
-            connection_ids: vec![a.id.clone(), b.id.clone()],
-        })
-        .unwrap();
-    let meta = hub
-        .create_profile(ProfileInput {
-            slug: "meta".into(),
-            name: "Meta".into(),
-            mode: ProfileMode::Meta,
-            connection_ids: vec![a.id.clone(), b.id.clone()],
-        })
-        .unwrap();
+    let endpoint = hub.endpoint().unwrap();
+    let token = hub.profile_token(&endpoint.id).unwrap();
 
     let server = plexus_core::http::serve(hub.clone(), 0).await.unwrap();
     let port = server.addr.port();
 
     // Wrong token is rejected before reaching MCP.
     let status = reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{port}/mcp/work"))
+        .post(format!("http://127.0.0.1:{port}/mcp"))
         .bearer_auth("nope")
         .send()
         .await
@@ -117,7 +117,7 @@ async fn aggregates_two_instances_of_the_same_server() {
     assert_eq!(status, 401);
 
     // Direct mode: namespaced tools from both instances.
-    let c = client(port, "work", &hub.profile_token(&work.id).unwrap()).await;
+    let c = client(port, &token).await;
     let mut names: Vec<String> = c
         .list_all_tools()
         .await
@@ -160,9 +160,9 @@ async fn aggregates_two_instances_of_the_same_server() {
     assert!(format!("{:?}", read.contents).contains("info for bravo"));
 
     // Hidden tools disappear; approval tools ask the broker.
-    hub.set_tool_policy(&work.id, &b.id, "echo", ToolPolicy::Hidden)
+    hub.set_tool_policy(&endpoint.id, &b.id, "echo", ToolPolicy::Hidden)
         .unwrap();
-    hub.set_tool_policy(&work.id, &a.id, "echo", ToolPolicy::Approval)
+    hub.set_tool_policy(&endpoint.id, &a.id, "echo", ToolPolicy::Approval)
         .unwrap();
     hub.set_approval_broker(Arc::new(Deny));
     let names: Vec<String> = c
@@ -183,7 +183,10 @@ async fn aggregates_two_instances_of_the_same_server() {
     assert_eq!(r.is_error, Some(true));
 
     // Meta mode: six tools, search + call through.
-    let m = client(port, "meta", &hub.profile_token(&meta.id).unwrap()).await;
+    hub.set_tool_policy(&endpoint.id, &b.id, "echo", ToolPolicy::Allow)
+        .unwrap();
+    set_mode(&hub, ProfileMode::Meta);
+    let m = client(port, &token).await;
     let meta_tools = m.list_all_tools().await.unwrap();
     assert_eq!(meta_tools.len(), 6);
     let r = m
@@ -257,27 +260,16 @@ async fn meta_mode_batches_fans_out_and_shapes_results() {
                 transport: fake(&[("FAKE_NAME", name)], &[]),
                 enabled: true,
                 idle_timeout_secs: None,
+                scope: None,
                 secrets: BTreeMap::new(),
             })
             .await
             .unwrap();
         ids.push(c.id);
     }
-    let meta = hub
-        .create_profile(ProfileInput {
-            slug: "meta".into(),
-            name: "Meta".into(),
-            mode: ProfileMode::Meta,
-            connection_ids: ids.clone(),
-        })
-        .unwrap();
+    let meta = set_mode(&hub, ProfileMode::Meta);
     let server = plexus_core::http::serve(hub.clone(), 0).await.unwrap();
-    let m = client(
-        server.addr.port(),
-        "meta",
-        &hub.profile_token(&meta.id).unwrap(),
-    )
-    .await;
+    let m = client(server.addr.port(), &hub.profile_token(&meta.id).unwrap()).await;
     let call = |name: &str, a: serde_json::Value| {
         m.call_tool(CallToolRequestParams::new(name.to_string()).with_arguments(args(a)))
     };

@@ -2,7 +2,35 @@
 
 Plexus is a menu-bar app that aggregates many MCP servers — including several
 instances of the same server (three Jiras, two Sentrys) — behind one local MCP
-endpoint per *profile*. Think Composio, but local, open, and in Rust.
+endpoint, routing each connection by the folder the client works in. Think
+Composio, but local, open, and in Rust.
+
+## Folder routing (2026-11-10)
+
+Replaces per-profile endpoints. Where it conflicts with the 2026-10-23 table
+below, this wins.
+
+| Topic | Decision |
+|---|---|
+| Endpoint | One: `/mcp`, one token, one mode, one set of tool policies and remote grants. Stored as the oldest `profiles` row |
+| Routing | Each connection has a `scope`: `everywhere`, or `folders` with any number of rules (none = no session gets it) |
+| Rules | A rule covers its folder and everything below (`/a/b` = `/a/b/` = `/a/b/*`); `*`/`?` within a segment, `**` any depth, leading `~`, symlinks resolved, case-insensitive on macOS (`folders.rs`) |
+| Client folder | Per request: the `X-Plexus-Folder` header if it holds an absolute path, else the session's MCP roots (`roots/list`, refetched on `roots/list_changed`) |
+| No folder | Only `everywhere` connections (Claude Desktop, claude.ai, ChatGPT) |
+| Migration | Connections in any profile → `everywhere`, in none → `folders: []`; policies merged, strictest wins; grants move to the endpoint; mode from the oldest profile |
+| Old URLs | `/mcp/{slug}` and its own token keep working as an alias of the endpoint, until removed on the Endpoint page; "Add to …" replaces `plexus-{slug}` client entries with `plexus` |
+
+Why a header as well as roots: clients on protocol 2026-07-28 (Claude Code
+today) are stateless. They never call `initialize`, so there is no session to
+send `roots/list` to, and in that version roots only come back through
+multi-round-trip requests on `tools/call`, never on `tools/list`. Claude Code
+expands `${PWD}` in configured headers, so the setup writes
+`X-Plexus-Folder: ${PWD}` and every request names its folder. Roots are also
+deprecated by SEP-2577, though functional for at least a year after it; they
+stay as the fallback for clients on older protocol versions.
+
+The header is not a security boundary: it only narrows what an authenticated
+client sees.
 
 ## Decisions (from design interview, 2026-10-23)
 
@@ -109,7 +137,7 @@ Profile tokens are cached in memory at startup to avoid a keychain hit per reque
   `running` on "Registered tunnel connection", not when the URL is first printed. The tunnel follows the server
   across port changes, and `settings.tunnel_enabled` restores it at launch.
 - A Host guard on the whole router: loopback `Host` without `cf-ray` is local; the tunnel's hostname is remote and
-  limited to `/mcp/*`, `/auth/*`, `/.well-known/*` and `/health`; anything else is 403. rmcp's own Host allowlist
+  limited to `/mcp`, `/mcp/*`, `/auth/*`, `/.well-known/*` and `/health`; anything else is 403. rmcp's own Host allowlist
   is disabled in favour of this.
 - Bearer clients use the profile token over the tunnel unchanged.
 - Web connectors (claude.ai, ChatGPT) use OAuth 2.1 (`remote.rs`). Each profile is an authorization server with
@@ -158,8 +186,9 @@ error result) → ensure upstream running → forward → log metadata → retur
 Upstream errors come back as `isError: true` tool results, not protocol errors.
 
 **Change notifications.** When a connection's tool list changes (upstream
-`list_changed`, edit, enable/disable, profile membership), every live session of
-affected profiles gets `notifications/tools/list_changed`.
+`list_changed`, edit, enable/disable, scope change), every live session gets
+`notifications/tools/list_changed`; a session whose client reports new roots
+gets it too.
 
 ## Upstream lifecycle
 
@@ -195,7 +224,7 @@ keychain-backed credential store where it fits.
 
 ## Client auto-config
 
-Every write: read → JSON merge (only our `plexus-{profile}` key) → back up to
+Every write: read → JSON merge (only our `plexus` key, minus old `plexus-{slug}` keys) → back up to
 `*.plexus.bak` → write. Show the exact change before applying.
 
 | Client | Mechanism |

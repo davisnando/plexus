@@ -21,7 +21,12 @@ impl AppState {
         self.server_info.lock().unwrap().clone()
     }
 
-    pub fn profile_url(&self, slug: &str) -> String {
+    pub fn endpoint_url(&self) -> String {
+        format!("http://127.0.0.1:{}/mcp", self.server_status().port)
+    }
+
+    /// A pre-folder-routing profile URL, still accepted as an alias.
+    pub fn legacy_url(&self, slug: &str) -> String {
         format!("http://127.0.0.1:{}/mcp/{slug}", self.server_status().port)
     }
 }
@@ -114,6 +119,7 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -191,9 +197,9 @@ pub fn run() {
             commands::stop_connection,
             commands::connection_tools,
             commands::list_profiles,
-            commands::create_profile,
             commands::update_profile,
-            commands::delete_profile,
+            commands::legacy_endpoints,
+            commands::delete_legacy_endpoint,
             commands::profile_token,
             commands::rotate_profile_token,
             commands::profile_tools,

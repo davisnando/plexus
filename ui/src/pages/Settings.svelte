@@ -54,7 +54,7 @@
     <label class="flex items-center justify-between gap-6">
       <span>
         <span class="block font-medium">Open at login</span>
-        <span class="text-[12px] text-muted">Keeps your profiles available whenever you're signed in.</span>
+        <span class="text-[12px] text-muted">Keeps the endpoint available whenever you're signed in.</span>
       </span>
       <input type="checkbox" class="size-4 accent-violet" bind:checked={launchAtLogin} onchange={toggleLogin} />
     </label>
@@ -108,8 +108,8 @@
         <span>
           <span class="block font-medium">Public tunnel</span>
           <span class="text-[12px] text-muted">
-            Makes your profiles reachable from the internet through a Cloudflare quick tunnel, for claude.ai, ChatGPT or
-            agents on other machines. Requests still need the profile token or a sign-in you approve on this Mac.
+            Makes the endpoint reachable from the internet through a Cloudflare quick tunnel, for claude.ai, ChatGPT or
+            agents on other machines. Requests still need the endpoint token or a sign-in you approve on this Mac.
           </span>
         </span>
         <input
@@ -127,7 +127,7 @@
           <CopyButton value={hub.tunnel.url} />
         </div>
         <p class="text-[12px] text-muted">
-          The address changes each time the tunnel starts. Profile pages show each profile's public endpoint.
+          The address changes each time the tunnel starts. The Endpoint page shows the public URL.
         </p>
       {:else if hub.tunnel.state === 'starting'}
         <p class="text-[12px] text-muted">Starting tunnel…</p>

@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 
 use plexus_core::{
     Hub, HubOptions,
-    model::{ProfileInput, ProfileMode, TunnelStatus},
+    model::TunnelStatus,
     secrets::MemorySecrets,
 };
 use reqwest::{StatusCode, header};
@@ -19,13 +19,6 @@ async fn quick_tunnel_exposes_only_public_routes() {
         resolve_shell_path: true,
     })
     .await
-    .unwrap();
-    hub.create_profile(ProfileInput {
-        slug: "work".into(),
-        name: "Work".into(),
-        mode: ProfileMode::Meta,
-        connection_ids: vec![],
-    })
     .unwrap();
     let server = plexus_core::http::serve(hub.clone(), 0).await.unwrap();
     hub.start_tunnel().await.unwrap();
@@ -57,17 +50,17 @@ async fn quick_tunnel_exposes_only_public_routes() {
     }
     assert!(health.is_some(), "tunnel never became reachable");
 
-    let r = http.post(format!("{base}/mcp/work")).send().await.unwrap();
+    let r = http.post(format!("{base}/mcp")).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     let challenge = r.headers()[header::WWW_AUTHENTICATE].to_str().unwrap();
     assert!(
-        challenge.contains(&format!("{base}/.well-known/oauth-protected-resource/mcp/work")),
+        challenge.contains(&format!("{base}/.well-known/oauth-protected-resource/mcp")),
         "{challenge}"
     );
 
-    let token = hub.profile_token(&hub.profile_by_slug("work").unwrap().id).unwrap();
+    let token = hub.profile_token(&hub.endpoint().unwrap().id).unwrap();
     let r = http
-        .post(format!("{base}/mcp/work"))
+        .post(format!("{base}/mcp"))
         .bearer_auth(&token)
         .header(header::ACCEPT, "application/json, text/event-stream")
         .header(header::CONTENT_TYPE, "application/json")

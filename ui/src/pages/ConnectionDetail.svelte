@@ -3,9 +3,10 @@
   import { api, toInput, type ToolInfo } from '../lib/api';
   import { aliasError, catalog, normalizeAlias } from '../lib/catalog';
   import { transportSummary } from '../lib/format';
-  import { connectionById, hub, reloadConnections } from '../lib/hub.svelte';
+  import { connectionById, reloadConnections } from '../lib/hub.svelte';
   import { navigate, route } from '../lib/router.svelte';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
+  import ScopeEditor from '../lib/ScopeEditor.svelte';
   import StatusDot from '../lib/StatusDot.svelte';
   import TransportEditor from '../lib/TransportEditor.svelte';
 
@@ -135,7 +136,6 @@
       (c.transport.auth === 'oauth' || (c.transport.auth === 'none' && c.status.state === 'needs_auth')),
   );
   const signedIn = $derived(!!c?.secrets_present.includes('oauth'));
-  const inProfiles = $derived(hub.profiles.filter((p) => p.connection_ids.includes(id)));
 </script>
 
 {#if !c}
@@ -186,6 +186,11 @@
   {#if error}<p class="mb-5 rounded-lg border border-fail/40 px-3.5 py-2.5 text-[12.5px] text-fail">{error}</p>{/if}
   {#if notice}<p class="mb-5 text-[12.5px] text-live">{notice}</p>{/if}
 
+  <section class="mb-6 rounded-xl border border-grid bg-surface px-4 py-3.5">
+    <h2 class="mb-2 text-[12px] font-medium text-muted">Available to clients working in</h2>
+    <ScopeEditor connection={c} />
+  </section>
+
   <div class="mb-4 flex items-center gap-5 border-b border-grid text-[13px] font-medium">
     {#each [['tools', `Tools (${tools.length})`], ['settings', 'Settings']] as [k, label] (k)}
       <button
@@ -196,13 +201,6 @@
         }}>{label}</button
       >
     {/each}
-    <span class="ml-auto pb-2 text-[12px] font-normal text-muted">
-      {#if inProfiles.length}
-        In {#each inProfiles as p, i (p.id)}<a href="#/profiles/{p.id}" class="text-ink hover:underline">{p.name}</a>{i < inProfiles.length - 1 ? ', ' : ''}{/each}
-      {:else}
-        Not in any profile yet. <a href="#/profiles" class="text-violet hover:underline">Add it to one</a>
-      {/if}
-    </span>
   </div>
 
   {#if tab === 'tools'}

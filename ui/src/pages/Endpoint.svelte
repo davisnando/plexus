@@ -5,6 +5,7 @@
     api,
     profileInput,
     type HubEvent,
+    type LegacyEndpoint,
     type ProfileMode,
     type ProfileTool,
     type RemoteGrant,
@@ -12,25 +13,23 @@
   } from '../lib/api';
   import ConfirmButton from '../lib/ConfirmButton.svelte';
   import CopyButton from '../lib/CopyButton.svelte';
-  import { timeAgo } from '../lib/format';
-  import { hub, profileById, reloadProfiles } from '../lib/hub.svelte';
-  import { navigate } from '../lib/router.svelte';
+  import { scopeLabel, timeAgo } from '../lib/format';
+  import { endpoint as currentEndpoint, hub, reloadProfiles } from '../lib/hub.svelte';
+  import ScopeEditor from '../lib/ScopeEditor.svelte';
+  import StatusDot from '../lib/StatusDot.svelte';
 
-  let { id }: { id: string } = $props();
-
-  const p = $derived(profileById(id));
+  const p = $derived(currentEndpoint());
+  const id = $derived(p?.id ?? '');
   let token = $state('');
   let reveal = $state(false);
   let tools = $state<ProfileTool[]>([]);
   let client = $state<'claude-code' | 'cursor' | 'vscode' | 'claude-desktop' | 'claude-web'>('claude-code');
   let usePublic = $state(false);
   let grants = $state<RemoteGrant[]>([]);
-  let editing = $state(false);
-  let name = $state('');
-  let slug = $state('');
-  let error = $state('');
+  let legacy = $state<LegacyEndpoint[]>([]);
 
   const loadGrants = () => api.remoteGrants(id).then((g) => (grants = g));
+  const loadLegacy = () => api.legacyEndpoints().then((l) => (legacy = l));
 
   function hostOf(uri: string): string {
     try {
@@ -44,23 +43,24 @@
     api.profileToken(id).then((t) => (token = t));
     api.profileTools(id).then((t) => (tools = t));
     loadGrants();
+    loadLegacy();
     const un = listen<HubEvent>('hub-event', ({ payload: e }) => {
       if (e.type === 'grants_changed' && e.profile_id === id) loadGrants();
+      if (e.type === 'profiles_changed') loadLegacy();
     });
     return () => {
       un.then((f) => f());
     };
   });
 
-  // Refresh tool rows when membership or connections change.
+  // Refresh tool rows when connections change.
   $effect(() => {
-    void p?.connection_ids.length;
-    void hub.connections.map((c) => c.tool_count).join();
+    void hub.connections.map((c) => `${c.id}:${c.tool_count}`).join();
     api.profileTools(id).then((t) => (tools = t));
   });
 
   const masked = $derived(reveal ? token : token.slice(0, 4) + '•'.repeat(18));
-  const serverName = $derived(`plexus-${p?.slug}`);
+  const serverName = 'plexus';
 
   // Snippets for another machine use the tunnel address.
   const endpoint = $derived(usePublic && p?.public_url ? p.public_url : (p?.url ?? ''));
@@ -75,7 +75,8 @@
           ? `1. In claude.ai, open Settings → Connectors → Add custom connector.\n2. Name it ${p.name} and paste this URL:\n\n   ${p.public_url}\n\n3. Click Connect, then Allow in the Plexus popup on this Mac.`
           : 'Turn on the public tunnel in Settings first. claude.ai reaches Plexus from the internet, not from this Mac.';
       case 'claude-code':
-        return `claude mcp add --transport http --scope user ${serverName} ${endpoint} \\\n  --header "Authorization: ${auth}"`;
+        // Single quotes keep the shell from expanding ${PWD}; Claude Code expands it per session.
+        return `claude mcp add --transport http --scope user ${serverName} ${endpoint} \\\n  --header "Authorization: ${auth}" \\\n  --header 'X-Plexus-Folder: \${PWD}'`;
       case 'cursor':
         return JSON.stringify({ mcpServers: { [serverName]: { url: endpoint, headers: { Authorization: auth } } } }, null, 2);
       case 'vscode':
@@ -102,7 +103,7 @@
   }
 
   const clients = [
-    ['claude-code', 'Claude Code', 'Run in a terminal.'],
+    ['claude-code', 'Claude Code', 'Run in a terminal. The folder header tells Plexus which project each session is in.'],
     ['cursor', 'Cursor', 'Merge into ~/.cursor/mcp.json.'],
     ['vscode', 'VS Code', 'Merge into your user mcp.json (Command Palette → MCP: Open User Configuration).'],
     ['claude-desktop', 'Claude Desktop', 'Merge into claude_desktop_config.json. Needs Node.js, since Desktop bridges HTTP through mcp-remote.'],
@@ -145,22 +146,9 @@
     reveal = true;
   }
 
-  async function saveMeta(e: SubmitEvent) {
-    e.preventDefault();
-    error = '';
-    try {
-      await api.updateProfile(id, { ...profileInput(p!), name: name.trim(), slug: slug.trim() });
-      await reloadProfiles();
-      editing = false;
-    } catch (err) {
-      error = String(err);
-    }
-  }
-
-  async function remove() {
-    await api.deleteProfile(id);
-    await reloadProfiles();
-    navigate('/profiles');
+  async function removeLegacy(l: LegacyEndpoint) {
+    await api.deleteLegacyEndpoint(l.id);
+    await loadLegacy();
   }
 
   const groups = $derived.by(() => {
@@ -177,27 +165,14 @@
 </script>
 
 {#if !p}
-  <p class="pt-6 text-muted">This profile no longer exists. <a href="#/profiles" class="underline">Back to profiles</a></p>
+  <p class="pt-6 text-muted">Loading endpoint…</p>
 {:else}
   <header class="pb-6 pt-2">
-    <a href="#/profiles" class="text-[12px] text-muted hover:text-ink">Profiles</a>
-    {#if editing}
-      <form class="mt-1 flex items-end gap-3" onsubmit={saveMeta}>
-        <label><span class="label">Name</span><input class="field" bind:value={name} required /></label>
-        <label><span class="label">URL slug</span><input class="field font-mono" bind:value={slug} required /></label>
-        <button class="btn btn-primary">Save</button>
-        <button type="button" class="btn btn-ghost" onclick={() => (editing = false)}>Cancel</button>
-      </form>
-      {#if error}<p class="mt-2 text-[12.5px] text-fail">{error}</p>{/if}
-    {:else}
-      <div class="mt-1 flex items-end justify-between">
-        <h1 class="page-title">{p.name}</h1>
-        <div class="flex gap-2">
-          <button class="btn" onclick={() => ((name = p.name), (slug = p.slug), (editing = true))}>Rename</button>
-          <ConfirmButton label="Delete" confirmLabel="Delete profile" warning="Clients using this endpoint disconnect." onconfirm={remove} />
-        </div>
-      </div>
-    {/if}
+    <h1 class="page-title">Endpoint</h1>
+    <p class="mt-1 max-w-[64ch] text-muted">
+      One MCP server for every client. Each session gets the connections routed to the folder its client works in, so
+      Claude Code in a client's repo sees that client's Jira and nothing else.
+    </p>
   </header>
 
   <section class="rounded-xl border border-grid bg-surface p-5">
@@ -272,6 +247,33 @@
     {/if}
   </section>
 
+  {#if legacy.length}
+    <section class="mt-8">
+      <h2 class="font-display text-[15px] font-semibold">Old profile URLs</h2>
+      <p class="mt-1 text-[12px] text-muted">
+        From before folder routing. They still work with their own tokens and serve the same tools as the endpoint. Once
+        your clients use the URL above (Add to … replaces the old entries), remove them.
+      </p>
+      <ul class="mt-3 divide-y divide-grid overflow-hidden rounded-xl border border-grid bg-surface">
+        {#each legacy as l (l.id)}
+          <li class="flex items-center gap-4 px-4 py-2.5">
+            <div class="min-w-0 flex-1">
+              <div class="truncate font-medium">{l.name}</div>
+              <div class="selectable truncate font-mono text-[11.5px] text-muted">{l.url}</div>
+            </div>
+            <ConfirmButton
+              class="btn btn-ghost"
+              label="Remove"
+              confirmLabel="Remove URL"
+              warning="Clients still using it disconnect."
+              onconfirm={() => removeLegacy(l)}
+            />
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
+
   {#if grants.length}
     <section class="mt-8">
       <h2 class="font-display text-[15px] font-semibold">Remote sign-ins</h2>
@@ -299,6 +301,30 @@
   {/if}
 
   <section class="mt-8">
+    <h2 class="font-display text-[15px] font-semibold">Routing</h2>
+    <p class="mt-1 text-[12px] text-muted">
+      Which connections a session gets, by the folder its client works in. Claude Code, Cursor and VS Code report their
+      folder; Claude Desktop and claude.ai don't, so they only get connections set to Everywhere.
+    </p>
+    {#if hub.connections.length === 0}
+      <p class="mt-4 text-muted">No connections yet. <a href="#/connections/new" class="text-violet hover:underline">Add one</a></p>
+    {:else}
+      <ul class="mt-3 divide-y divide-grid rounded-xl border border-grid bg-surface">
+        {#each hub.connections as c (c.id)}
+          <li class="grid grid-cols-[200px_1fr] items-start gap-4 px-4 py-3">
+            <a href="#/connections/{c.id}" class="flex min-w-0 items-center gap-2 pt-0.5">
+              <StatusDot status={c.status} />
+              <span class="truncate font-medium">{c.name}</span>
+              <span class="font-mono text-[11px] text-muted">{c.alias}</span>
+            </a>
+            <ScopeEditor connection={c} compact />
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </section>
+
+  <section class="mt-8">
     <h2 class="font-display text-[15px] font-semibold">How tools are offered</h2>
     <div class="mt-3 grid grid-cols-2 gap-2.5">
       {#each [['direct', 'Every tool', 'The client sees each tool directly, prefixed with its alias. Best with a few connections.'], ['meta', 'Search & call', 'The client gets four tools (list, search, describe, call) and looks tools up on demand. Keeps context small with many connections.']] as [m, title, desc] (m)}
@@ -322,13 +348,17 @@
     </p>
     {#if groups.length === 0}
       <p class="mt-4 text-muted">
-        No tools yet. Route connections into this profile on the <a href="#/profiles" class="text-violet hover:underline">Profiles</a> page, then test them.
+        No tools yet. <a href="#/connections" class="text-violet hover:underline">Test a connection</a> to load its tools.
       </p>
     {/if}
     {#each groups as g (g[0].connection_id)}
+      {@const conn = hub.connections.find((c) => c.id === g[0].connection_id)}
       <div class="mt-4 overflow-hidden rounded-xl border border-grid bg-surface">
         <div class="flex items-center justify-between border-b border-grid bg-paper/50 px-4 py-2">
-          <span class="font-medium">{g[0].connection_name} <span class="font-mono text-[11.5px] font-normal text-muted">{g[0].connection_alias}</span></span>
+          <span class="font-medium"
+            >{g[0].connection_name} <span class="font-mono text-[11.5px] font-normal text-muted">{g[0].connection_alias}</span>
+            {#if conn}<span class="ml-1.5 text-[11.5px] font-normal text-muted">· {scopeLabel(conn.scope)}</span>{/if}</span
+          >
           <select class="field w-auto py-0.5 text-[12px]" onchange={(e) => setAll(g[0].connection_id, e.currentTarget.value as ToolPolicy)}>
             <option value="" selected disabled>Set all…</option>
             {#each policies as [v, label] (v)}<option value={v}>{label}</option>{/each}

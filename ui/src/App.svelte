@@ -7,9 +7,8 @@
   import Approval from './pages/Approval.svelte';
   import ConnectionDetail from './pages/ConnectionDetail.svelte';
   import Connections from './pages/Connections.svelte';
+  import Endpoint from './pages/Endpoint.svelte';
   import NewConnection from './pages/NewConnection.svelte';
-  import ProfileDetail from './pages/ProfileDetail.svelte';
-  import Profiles from './pages/Profiles.svelte';
   import Settings from './pages/Settings.svelte';
 
   const approval = $derived(match('/approval/:id'));
@@ -25,7 +24,7 @@
 
   const nav = [
     { path: '/connections', label: 'Connections' },
-    { path: '/profiles', label: 'Profiles' },
+    { path: '/endpoint', label: 'Endpoint' },
     { path: '/activity', label: 'Activity' },
     { path: '/settings', label: 'Settings' },
   ];
@@ -102,11 +101,8 @@
         {:else if match('/connections/:id')}
           {@const p = match('/connections/:id')!}
           {#key p.id}<ConnectionDetail id={p.id} />{/key}
-        {:else if match('/profiles')}
-          <Profiles />
-        {:else if match('/profiles/:id')}
-          {@const p = match('/profiles/:id')!}
-          {#key p.id}<ProfileDetail id={p.id} />{/key}
+        {:else if match('/endpoint') || match('/profiles') || match('/profiles/:id')}
+          <Endpoint />
         {:else if match('/activity')}
           <Activity />
         {:else if match('/settings')}

@@ -1,7 +1,8 @@
-//! Remote access through the tunnel. Bearer-token clients use the profile
+//! Remote access through the tunnel. Bearer-token clients use the endpoint
 //! token as they do locally. Web connectors (claude.ai, ChatGPT) need OAuth,
-//! so each profile is also an OAuth 2.1 authorization server with issuer
-//! `{base}/auth/{slug}`: protected resource metadata (RFC 9728), server
+//! so the endpoint is also an OAuth 2.1 authorization server with issuer
+//! `{base}/auth/{slug}` (legacy profile slugs keep their own issuer, which
+//! signs in to the same endpoint): protected resource metadata (RFC 9728), server
 //! metadata (RFC 8414), dynamic client registration (RFC 7591), and auth code
 //! with PKCE. Consent happens in a popup on this Mac, never on the web page,
 //! so reaching the public URL is not enough to get in.
@@ -151,10 +152,12 @@ fn issuer(base: &str, slug: &str) -> String {
     format!("{base}/auth/{slug}")
 }
 
-/// `WWW-Authenticate` value pointing clients at the profile's resource metadata.
-pub(crate) fn www_authenticate(base: &str, slug: &str) -> String {
+/// `WWW-Authenticate` value pointing clients at the resource metadata of
+/// `/mcp` (`slug: None`) or a legacy `/mcp/{slug}` URL.
+pub(crate) fn www_authenticate(base: &str, slug: Option<&str>) -> String {
+    let path = slug.map(|s| format!("/{s}")).unwrap_or_default();
     format!(
-        r#"Bearer error="invalid_token", resource_metadata="{base}/.well-known/oauth-protected-resource/mcp/{slug}""#
+        r#"Bearer error="invalid_token", resource_metadata="{base}/.well-known/oauth-protected-resource/mcp{path}""#
     )
 }
 
@@ -163,6 +166,22 @@ fn not_found() -> Response {
 }
 
 // ---- metadata ----
+
+pub(crate) async fn root_resource_metadata(
+    State(hub): State<Hub>,
+    axum::Extension(PublicBase(base)): axum::Extension<PublicBase>,
+) -> Response {
+    let Ok(profile) = hub.endpoint() else {
+        return not_found();
+    };
+    Json(json!({
+        "resource": format!("{base}/mcp"),
+        "authorization_servers": [issuer(&base, &profile.slug)],
+        "bearer_methods_supported": ["header"],
+        "resource_name": profile.name,
+    }))
+    .into_response()
+}
 
 pub(crate) async fn resource_metadata(
     State(hub): State<Hub>,
@@ -176,7 +195,7 @@ pub(crate) async fn resource_metadata(
         "resource": format!("{base}/mcp/{slug}"),
         "authorization_servers": [issuer(&base, &slug)],
         "bearer_methods_supported": ["header"],
-        "resource_name": format!("Plexus · {}", profile.name),
+        "resource_name": profile.name,
     }))
     .into_response()
 }
@@ -383,8 +402,10 @@ pub(crate) async fn authorize(
         (Some(c), Some("S256")) if !c.is_empty() => c,
         _ => return redirect_error(&redirect_uri, "invalid_request", state, &issuer),
     };
+    // The endpoint's `/mcp`, or the legacy URL that belongs to this issuer.
     if let Some(resource) = &q.resource
         && !resource.trim_end_matches('/').ends_with(&format!("/mcp/{slug}"))
+        && !(slug == profile.slug && resource.trim_end_matches('/').ends_with("/mcp"))
     {
         return redirect_error(&redirect_uri, "invalid_target", state, &issuer);
     }

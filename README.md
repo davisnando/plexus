@@ -1,20 +1,25 @@
 # Plexus
 
 A local MCP hub that lives in your menu bar. Add MCP servers, including the same server several times for different
-accounts (three Jira sites, two Sentry orgs), group them into **profiles**, and point Claude Code, Cursor, VS Code or
-Claude Desktop at one endpoint per profile.
+accounts (three Jira sites, two Sentry orgs), and point Claude Code, Cursor, VS Code or Claude Desktop at **one**
+endpoint. Each connection is available everywhere or only to clients working in certain folders.
 
 ```
-Claude Code ──► http://127.0.0.1:7420/mcp/work ──► jira_acme · jira_client · sentry_prod
-Cursor      ──► http://127.0.0.1:7420/mcp/side ──► linear · sentry_prod
+                                              ┌─ ~/work/acme/*    ─► jira_acme
+Claude Code in ~/work/acme/web ─► /mcp ──────┼─ ~/work/client/*  ─► jira_client
+                                              └─ everywhere       ─► sentry_prod · linear
 ```
 
 ## Features
 
 - **Many instances of one server.** Every connection has an alias, and its tools are exposed as `{alias}__{tool}`
   (e.g. `jira_acme__create_issue`).
-- **Profiles.** Each profile has its own endpoint and bearer token, a routing matrix that picks its connections, and
-  per-tool policies (allow / ask / hide).
+- **Folder routing.** One endpoint (`/mcp`) and token. Each connection is available *everywhere* or *only in folders*,
+  with as many rules as you like (`~/work/acme/*`, `~/work/client-*`). A rule covers its folder and everything below
+  it; `*` matches part of a name, `**` any depth. Plexus learns the client's folder from an `X-Plexus-Folder` header
+  (Claude Code setup sends `${PWD}`), or else from the client's MCP roots. Clients that report no folder (Claude
+  Desktop, claude.ai) only get *everywhere* connections. Per-tool policies (allow / ask / hide) apply to all.
+  Profile URLs from before folder routing (`/mcp/{slug}`) keep working as aliases until you remove them.
 - **Two tool modes.** *Every tool* re-exports all tools directly. *Search & call* exposes six meta tools
   (`list_connections`, `search_tools`, `describe_tool`, `call_tool`, `call_tools`, `connect`) with BM25 search, which
   keeps the client's context small when many servers are connected. Calls can fan out over several instances
@@ -35,17 +40,18 @@ Cursor      ──► http://127.0.0.1:7420/mcp/side ──► linear · sentry_
 - **One-click client setup** for Claude Code (via `claude mcp add`), Cursor, VS Code and Claude Desktop (via
   `mcp-remote`). Config files are merged and backed up to `*.plexus.bak` first.
 - **Public tunnel.** One switch starts a Cloudflare quick tunnel (`brew install cloudflared`, no account), so every
-  profile also gets an `https://….trycloudflare.com/mcp/{slug}` endpoint. CLI agents elsewhere use the profile token.
-  claude.ai and ChatGPT custom connectors sign in with OAuth: each profile is its own authorization server, and you
-  approve every sign-in in a popup on your Mac. Sign-ins are listed on the profile page and can be revoked. The
+  the endpoint is also reachable at `https://….trycloudflare.com/mcp`. CLI agents elsewhere use the endpoint token.
+  claude.ai and ChatGPT custom connectors sign in with OAuth: the endpoint is its own authorization server, and you
+  approve every sign-in in a popup on your Mac. Sign-ins are listed on the Endpoint page and can be revoked. The
   address changes each time the tunnel starts.
 
 ## Security model
 
-The server binds `127.0.0.1` only. Every request needs the profile's bearer token (compared in constant time) or an
-OAuth access token you approved for that profile. Requests carrying an `Origin` header are rejected, which blocks
+The server binds `127.0.0.1` only. Every request needs the endpoint's bearer token (compared in constant time) or an
+OAuth access token you approved. The folder header only narrows what a client sees; it grants nothing a valid token
+doesn't. Requests carrying an `Origin` header are rejected, which blocks
 browser pages, and a `Host` other than localhost or the tunnel's hostname is refused, which blocks DNS rebinding.
-Through the tunnel only `/mcp/*`, the OAuth routes and `/health` are reachable. Opening the tunnel URL alone gets
+Through the tunnel only `/mcp`, `/mcp/*`, the OAuth routes and `/health` are reachable. Opening the tunnel URL alone gets
 nobody in: OAuth needs a click on this Mac, and at most three sign-in prompts can wait at once.
 
 ## Develop
@@ -73,7 +79,7 @@ notarized when `APPLE_ID`, `APPLE_PASSWORD` (an app-specific password) and `APPL
 MIT, see [LICENSE](LICENSE).
 
 The dashboard opens from the menu bar icon, or by launching the app a second time. To iterate on the UI in a normal
-browser with mocked data, open `http://localhost:5173/preview.html#/profiles` while `pnpm dev` (or `pnpm --dir ui dev`)
+browser with mocked data, open `http://localhost:5173/preview.html#/endpoint` while `pnpm dev` (or `pnpm --dir ui dev`)
 is running.
 
 ## Layout

@@ -1,6 +1,11 @@
-//! The MCP server each profile endpoint speaks.
+//! The MCP server the endpoint speaks, one instance per client session.
+//! Each request sees the connections whose scope matches the folder the
+//! client works in: the `X-Plexus-Folder` header if the client sends one
+//! (Claude Code fills it from `${PWD}`), otherwise the session's MCP roots.
+//! The header matters because clients on protocol 2026-07-28 have no session
+//! to ask roots of when they list tools.
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -10,7 +15,7 @@ use rmcp::{
         ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities, ServerConfig,
         SubscriptionFilter, Tool,
     },
-    service::{NotificationContext, RequestContext, SubscriptionContext},
+    service::{NotificationContext, Peer, RequestContext, SubscriptionContext},
 };
 use serde_json::{Value, json};
 
@@ -32,21 +37,51 @@ const DEFAULT_MAX_CHARS: usize = 50_000;
 /// Most upstream calls one `call_tool` / `call_tools` request may expand to.
 const MAX_CALLS: usize = 20;
 
+/// Request header carrying the client's working folder.
+pub const FOLDER_HEADER: &str = "x-plexus-folder";
+
+/// How long to wait for a client to answer `roots/list`.
+const ROOTS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The folders a session's client reported: `None` if it reports none.
+type Roots = Option<Vec<PathBuf>>;
+
 #[derive(Clone)]
 pub struct HubServer {
     hub: Hub,
     profile_id: String,
+    /// Fetched on first use; cleared when the client says its roots changed.
+    roots: Arc<tokio::sync::Mutex<Option<Roots>>>,
 }
 
 impl HubServer {
     pub fn new(hub: Hub, profile_id: String) -> Self {
-        Self { hub, profile_id }
+        Self {
+            hub,
+            profile_id,
+            roots: Default::default(),
+        }
     }
 
-    fn profile(&self) -> Result<Profile, McpError> {
+    /// The endpoint as this request sees it.
+    async fn profile(&self, context: &RequestContext<RoleServer>) -> Result<Profile, McpError> {
+        let roots = match header_folder(context) {
+            Some(folder) => Some(vec![folder]),
+            None => self.roots(&context.peer).await,
+        };
         self.hub
-            .profile(&self.profile_id)
+            .session_profile(roots.as_deref())
             .map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    async fn roots(&self, peer: &Peer<RoleServer>) -> Roots {
+        let mut cached = self.roots.lock().await;
+        if let Some(roots) = cached.as_ref() {
+            return roots.clone();
+        }
+        let roots = fetch_roots(peer).await;
+        *cached = Some(roots.clone());
+        roots
     }
 
     fn direct_tools(&self, profile: &Profile) -> Result<Vec<Tool>, McpError> {
@@ -403,7 +438,7 @@ fn budget_and_reason(args: &JsonObject) -> (usize, Option<String>) {
 
 impl ServerHandler for HubServer {
     fn get_info(&self) -> ServerConfig {
-        let instructions = match self.profile().map(|p| p.mode) {
+        let instructions = match self.hub.endpoint().map(|p| p.mode) {
             Ok(ProfileMode::Meta) => format!(
                 "Plexus gives access to many connected services. Use `{META_SEARCH}` to find a \
                  tool, `{META_DESCRIBE}` to get its input schema, then `{META_CALL}` to run it. \
@@ -430,9 +465,9 @@ impl ServerHandler for HubServer {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let profile = self.profile()?;
+        let profile = self.profile(&context).await?;
         let tools = match profile.mode {
             ProfileMode::Direct => {
                 let _ = self.hub.ensure_discovered(&profile).await;
@@ -449,9 +484,9 @@ impl ServerHandler for HubServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let profile = self.profile()?;
+        let profile = self.profile(&context).await?;
         let result = match profile.mode {
             ProfileMode::Direct => {
                 self.hub
@@ -473,9 +508,9 @@ impl ServerHandler for HubServer {
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        let profile = self.profile()?;
+        let profile = self.profile(&context).await?;
         let _ = self.hub.ensure_discovered(&profile).await;
         let resources = self
             .hub
@@ -490,9 +525,9 @@ impl ServerHandler for HubServer {
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
-        let profile = self.profile()?;
+        let profile = self.profile(&context).await?;
         self.hub
             .read_resource(&profile, &request.uri)
             .await
@@ -503,6 +538,15 @@ impl ServerHandler for HubServer {
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
         self.hub
             .register_legacy_peer(self.profile_id.clone(), context.peer.clone());
+    }
+
+    async fn on_roots_list_changed(&self, context: NotificationContext<RoleServer>) {
+        let old = self.roots.lock().await.take();
+        let new = self.roots(&context.peer).await;
+        if old.as_ref() != Some(&new) {
+            let _ = context.peer.notify_tool_list_changed().await;
+            let _ = context.peer.notify_resource_list_changed().await;
+        }
     }
 
     fn accepted_subscription_filter(
@@ -526,6 +570,45 @@ impl ServerHandler for HubServer {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
                 },
             }
+        }
+    }
+}
+
+/// The absolute folder in the request's `X-Plexus-Folder` header. An
+/// unexpanded placeholder such as `${PWD}` is not absolute and is ignored.
+fn header_folder(context: &RequestContext<RoleServer>) -> Option<PathBuf> {
+    let parts = context.extensions.get::<http::request::Parts>()?;
+    let value = parts.headers.get(FOLDER_HEADER)?;
+    let folder = PathBuf::from(String::from_utf8_lossy(value.as_bytes()).trim());
+    folder.is_absolute().then_some(folder)
+}
+
+/// Asks the client for its folders, if it supports roots. Roots are
+/// deprecated by SEP-2577 (2026-07-28) but stay functional for at least a
+/// year, and Claude Code, VS Code and Cursor send them.
+#[allow(deprecated)]
+async fn fetch_roots(peer: &Peer<RoleServer>) -> Roots {
+    let supported = peer
+        .peer_info()
+        .is_some_and(|info| info.capabilities.roots.is_some());
+    if !supported {
+        return None;
+    }
+    match tokio::time::timeout(ROOTS_TIMEOUT, peer.list_roots()).await {
+        Ok(Ok(result)) => Some(
+            result
+                .roots
+                .iter()
+                .filter_map(|r| crate::folders::root_path(&r.uri))
+                .collect(),
+        ),
+        Ok(Err(e)) => {
+            tracing::warn!("roots/list failed: {e}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("roots/list timed out");
+            None
         }
     }
 }

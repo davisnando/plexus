@@ -1,5 +1,6 @@
-//! Local HTTP endpoint: `POST|GET|DELETE /mcp/{profile}` with a bearer token,
-//! plus the OAuth routes remote clients use through the tunnel.
+//! Local HTTP endpoint: `POST|GET|DELETE /mcp` with a bearer token (and the
+//! legacy `/mcp/{profile}` URLs as aliases), plus the OAuth routes remote
+//! clients use through the tunnel.
 
 use std::{
     collections::HashMap,
@@ -71,7 +72,7 @@ pub async fn serve(hub: Hub, port: u16) -> Result<HttpServer> {
         ct: ct.clone(),
     };
 
-    // Drop per-profile services (and their sessions) when profiles disappear.
+    // Drop the endpoint's service (and its sessions) if the endpoint changes.
     {
         let state = state.clone();
         let mut rx = hub.subscribe();
@@ -104,8 +105,13 @@ pub async fn serve(hub: Hub, port: u16) -> Result<HttpServer> {
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
-        .route("/mcp/{slug}", any(mcp))
+        .route("/mcp", any(mcp_root))
+        .route("/mcp/{slug}", any(mcp_legacy))
         .route("/oauth/callback", get(crate::oauth::callback))
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(remote::root_resource_metadata),
+        )
         .route(
             "/.well-known/oauth-protected-resource/mcp/{slug}",
             get(remote::resource_metadata),
@@ -175,6 +181,7 @@ async fn guard(State(hub): State<Hub>, mut req: Request, next: Next) -> Response
     } else if hub.tunnel_host().is_some_and(|h| h == host) {
         let path = req.uri().path();
         let public = path == "/health"
+            || path == "/mcp"
             || path.starts_with("/mcp/")
             || path.starts_with("/auth/")
             || path.starts_with("/.well-known/");
@@ -189,24 +196,32 @@ async fn guard(State(hub): State<Hub>, mut req: Request, next: Next) -> Response
     next.run(req).await
 }
 
-async fn mcp(State(state): State<AppState>, Path(slug): Path<String>, req: Request) -> Response {
+async fn mcp_root(State(state): State<AppState>, req: Request) -> Response {
+    mcp(state, None, req).await
+}
+
+async fn mcp_legacy(State(state): State<AppState>, Path(slug): Path<String>, req: Request) -> Response {
+    mcp(state, Some(slug), req).await
+}
+
+async fn mcp(state: AppState, slug: Option<String>, req: Request) -> Response {
     let token = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default();
-    let Some(profile_id) = state.hub.authenticate(&slug, token) else {
+    let Some(profile_id) = state.hub.authenticate(slug.as_deref(), token) else {
         let mut response = (
             StatusCode::UNAUTHORIZED,
             [(header::CONTENT_TYPE, "application/json")],
-            r#"{"error":"invalid or missing bearer token for this profile"}"#,
+            r#"{"error":"invalid or missing bearer token"}"#,
         )
             .into_response();
         // Points OAuth clients (claude.ai connectors) at the sign-in flow.
         if let Some(PublicBase(base)) = req.extensions().get::<PublicBase>()
-            && state.hub.profile_by_slug(&slug).is_some()
-            && let Ok(value) = remote::www_authenticate(base, &slug).parse()
+            && slug.as_deref().is_none_or(|s| state.hub.profile_by_slug(s).is_some())
+            && let Ok(value) = remote::www_authenticate(base, slug.as_deref()).parse()
         {
             response
                 .headers_mut()

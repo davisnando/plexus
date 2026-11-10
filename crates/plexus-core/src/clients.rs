@@ -1,6 +1,7 @@
-//! Register a profile endpoint with MCP clients by editing their config.
-//! JSON files are merged (only our `plexus-{slug}` entry changes) and backed
-//! up to `*.plexus.bak` before writing.
+//! Register the endpoint with MCP clients by editing their config.
+//! JSON files are merged (only our `plexus` entry changes, and the
+//! `plexus-{slug}` entries of old per-profile endpoints are removed) and
+//! backed up to `*.plexus.bak` before writing.
 
 use std::path::{Path, PathBuf};
 
@@ -17,15 +18,23 @@ pub enum Client {
     Vscode,
 }
 
+/// The name Plexus registers itself under in client configs.
+pub const SERVER_NAME: &str = "plexus";
+
+/// Header telling Plexus the session's folder; Claude Code expands `${PWD}`.
+const CLAUDE_CODE_FOLDER: (&str, &str) = ("X-Plexus-Folder", "${PWD}");
+
 pub struct Endpoint<'a> {
-    pub slug: &'a str,
     pub url: &'a str,
     pub token: &'a str,
+    /// Slugs of the profiles from before folder routing; their
+    /// `plexus-{slug}` entries are replaced by the single `plexus` one.
+    pub legacy_slugs: &'a [String],
 }
 
 impl Endpoint<'_> {
-    pub fn server_name(&self) -> String {
-        format!("plexus-{}", self.slug)
+    fn legacy_names(&self) -> Vec<String> {
+        self.legacy_slugs.iter().map(|s| format!("plexus-{s}")).collect()
     }
 }
 
@@ -64,9 +73,15 @@ pub fn entry(client: Client, endpoint: &Endpoint) -> (&'static str, Value) {
             "servers",
             json!({ "type": "http", "url": endpoint.url, "headers": { "Authorization": auth } }),
         ),
+        // Claude Code expands `${PWD}` per session, so every request says which
+        // folder it comes from; on protocol 2026-07-28 that is the only way.
         Client::ClaudeCode => (
             "mcpServers",
-            json!({ "type": "http", "url": endpoint.url, "headers": { "Authorization": auth } }),
+            json!({
+                "type": "http",
+                "url": endpoint.url,
+                "headers": { "Authorization": auth, CLAUDE_CODE_FOLDER.0: CLAUDE_CODE_FOLDER.1 },
+            }),
         ),
         // Desktop's config file only launches stdio servers; mcp-remote bridges to HTTP.
         Client::ClaudeDesktop => (
@@ -90,8 +105,9 @@ pub fn install(client: Client, endpoint: &Endpoint, shell_path: Option<&str>) ->
     }
     let path = config_path(client)?;
     let (key, value) = entry(client, endpoint);
-    merge_json(&path, key, &endpoint.server_name(), Some(value))?;
-    let mut msg = format!("Added {} to {}.", endpoint.server_name(), path.display());
+    let removed = merge_json(&path, key, Some(value), &endpoint.legacy_names())?;
+    let mut msg = format!("Added {SERVER_NAME} to {}.", path.display());
+    msg.push_str(&replaced(&removed));
     if client == Client::ClaudeDesktop {
         msg.push_str(" Restart Claude Desktop to load it.");
     }
@@ -102,9 +118,17 @@ pub fn uninstall(client: Client, endpoint: &Endpoint) -> Result<()> {
     let path = config_path(client)?;
     let (key, _) = entry(client, endpoint);
     if path.exists() {
-        merge_json(&path, key, &endpoint.server_name(), None)?;
+        merge_json(&path, key, None, &endpoint.legacy_names())?;
     }
     Ok(())
+}
+
+fn replaced(removed: &[String]) -> String {
+    if removed.is_empty() {
+        String::new()
+    } else {
+        format!(" It replaces {}.", removed.join(", "))
+    }
 }
 
 fn install_with_claude_cli(endpoint: &Endpoint, shell_path: Option<&str>) -> Result<String> {
@@ -116,21 +140,33 @@ fn install_with_claude_cli(endpoint: &Endpoint, shell_path: Option<&str>) -> Res
         }
         cmd.output()
     };
-    let name = endpoint.server_name();
-    let _ = run(&["mcp", "remove", "--scope", "user", &name]);
+    let _ = run(&["mcp", "remove", "--scope", "user", SERVER_NAME]);
     let header = format!("Authorization: Bearer {}", endpoint.token);
+    let folder = format!("{}: {}", CLAUDE_CODE_FOLDER.0, CLAUDE_CODE_FOLDER.1);
     let out = run(&[
-        "mcp", "add", "--transport", "http", "--scope", "user", &name, endpoint.url, "--header",
-        &header,
+        "mcp", "add", "--transport", "http", "--scope", "user", SERVER_NAME, endpoint.url,
+        "--header", &header, "--header", &folder,
     ])
     .context("`claude` CLI not found")?;
     if !out.status.success() {
         bail!("{}", String::from_utf8_lossy(&out.stderr));
     }
-    Ok(format!("Added {name} to Claude Code (user scope)."))
+    let removed: Vec<String> = endpoint
+        .legacy_names()
+        .into_iter()
+        .filter(|name| {
+            run(&["mcp", "remove", "--scope", "user", name]).is_ok_and(|o| o.status.success())
+        })
+        .collect();
+    Ok(format!(
+        "Added {SERVER_NAME} to Claude Code (user scope).{}",
+        replaced(&removed)
+    ))
 }
 
-fn merge_json(path: &Path, key: &str, name: &str, value: Option<Value>) -> Result<()> {
+/// Sets (or with `None` removes) our entry under `key` and removes the
+/// `legacy` entries. Returns the legacy names that were present.
+fn merge_json(path: &Path, key: &str, value: Option<Value>, legacy: &[String]) -> Result<Vec<String>> {
     let mut root = if path.exists() {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("read {}", path.display()))?;
@@ -157,12 +193,17 @@ fn merge_json(path: &Path, key: &str, name: &str, value: Option<Value>) -> Resul
         .ok_or_else(|| anyhow!("`{key}` in {} is not an object", path.display()))?;
     match value {
         Some(v) => {
-            servers.insert(name.to_string(), v);
+            servers.insert(SERVER_NAME.to_string(), v);
         }
         None => {
-            servers.remove(name);
+            servers.remove(SERVER_NAME);
         }
     }
+    let removed: Vec<String> = legacy
+        .iter()
+        .filter(|name| servers.remove(name.as_str()).is_some())
+        .cloned()
+        .collect();
     if path.exists() {
         let backup = path.with_extension(format!(
             "{}.plexus.bak",
@@ -175,7 +216,7 @@ fn merge_json(path: &Path, key: &str, name: &str, value: Option<Value>) -> Resul
     let tmp = path.with_extension("plexus.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&root)? + "\n")?;
     std::fs::rename(&tmp, path)?;
-    Ok(())
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -186,26 +227,30 @@ mod tests {
     fn merges_without_touching_other_servers() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mcp.json");
-        std::fs::write(&path, r#"{"mcpServers":{"other":{"url":"x"}},"theme":"dark"}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"other":{"url":"x"},"plexus-work":{"url":"old"}},"theme":"dark"}"#,
+        )
+        .unwrap();
+        let legacy = vec!["work".to_string()];
         let ep = Endpoint {
-            slug: "work",
-            url: "http://127.0.0.1:7420/mcp/work",
+            url: "http://127.0.0.1:7420/mcp",
             token: "t",
+            legacy_slugs: &legacy,
         };
         let (key, value) = entry(Client::Cursor, &ep);
-        merge_json(&path, key, &ep.server_name(), Some(value)).unwrap();
+        let removed = merge_json(&path, key, Some(value), &ep.legacy_names()).unwrap();
+        assert_eq!(removed, ["plexus-work"]);
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["theme"], "dark");
         assert_eq!(v["mcpServers"]["other"]["url"], "x");
-        assert_eq!(
-            v["mcpServers"]["plexus-work"]["headers"]["Authorization"],
-            "Bearer t"
-        );
+        assert_eq!(v["mcpServers"]["plexus"]["headers"]["Authorization"], "Bearer t");
+        assert!(v["mcpServers"].get("plexus-work").is_none());
         assert!(dir.path().join("mcp.json.plexus.bak").exists());
 
-        merge_json(&path, key, &ep.server_name(), None).unwrap();
+        merge_json(&path, key, None, &[]).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(v["mcpServers"].get("plexus-work").is_none());
+        assert!(v["mcpServers"].get("plexus").is_none());
     }
 
     #[test]
@@ -213,7 +258,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mcp.json");
         std::fs::write(&path, "// comment\n{}").unwrap();
-        assert!(merge_json(&path, "servers", "plexus-x", Some(json!({}))).is_err());
+        assert!(merge_json(&path, "servers", Some(json!({})), &[]).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "// comment\n{}");
     }
 }

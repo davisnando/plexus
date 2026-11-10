@@ -74,6 +74,7 @@ export function connectionById(id: string) {
   return hub.connections.find((c) => c.id === id);
 }
 
-export function profileById(id: string) {
-  return hub.profiles.find((p) => p.id === id);
+/** The endpoint clients connect to; there is exactly one. */
+export function endpoint() {
+  return hub.profiles[0];
 }

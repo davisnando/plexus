@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { api, profileInput, type ConnectionInput, type Transport } from '../lib/api';
+  import { open } from '@tauri-apps/plugin-dialog';
+  import { api, type ConnectionInput, type Transport } from '../lib/api';
   import { aliasError, catalog, fromTemplate, normalizeAlias, slugify, suggestAlias, type Template } from '../lib/catalog';
   import { hub, reloadConnections } from '../lib/hub.svelte';
   import { navigate } from '../lib/router.svelte';
@@ -15,7 +16,13 @@
   let aliasTouched = $state(false);
   let checkAlias = $state(false);
   let values = $state<Record<string, string>>({});
-  let profileIds = $state<string[]>(hub.profiles.length === 1 ? [hub.profiles[0].id] : []);
+  // One folder rule per line; empty means available everywhere.
+  let folderRules = $state('');
+
+  async function pickFolder() {
+    const dir = await open({ directory: true, multiple: false });
+    if (typeof dir === 'string') folderRules = [folderRules.trim(), dir].filter(Boolean).join('\n');
+  }
   let error = $state('');
   let saving = $state(false);
   let editor = $state<ReturnType<typeof TransportEditor>>();
@@ -87,13 +94,9 @@
     }
     saving = true;
     try {
+      const folders = folderRules.split('\n').map((f) => f.trim()).filter(Boolean);
+      if (folders.length) input.scope = { kind: 'folders', folders };
       const created = await api.createConnection(input);
-      for (const id of profileIds) {
-        const p = hub.profiles.find((p) => p.id === id)!;
-        const next = profileInput(p);
-        next.connection_ids.push(created.id);
-        await api.updateProfile(id, next);
-      }
       await reloadConnections();
       if (input.transport.kind === 'http' && input.transport.auth === 'oauth') {
         // Go straight to the browser; discovery runs once sign-in completes.
@@ -230,19 +233,22 @@
       <TransportEditor bind:this={editor} initial={customStdio} />
     {/if}
 
-    {#if hub.profiles.length}
-      <fieldset>
-        <span class="label">Add to profiles</span>
-        <div class="flex flex-wrap gap-x-4 gap-y-1.5">
-          {#each hub.profiles as p (p.id)}
-            <label class="flex items-center gap-1.5">
-              <input type="checkbox" class="accent-violet" value={p.id} bind:group={profileIds} />
-              {p.name}
-            </label>
-          {/each}
-        </div>
-      </fieldset>
-    {/if}
+    <fieldset>
+      <span class="label">Only for clients working in (optional)</span>
+      <div class="flex items-start gap-2">
+        <textarea
+          class="field min-h-[38px] font-mono text-[12px]"
+          rows={Math.max(1, folderRules.split('\n').length)}
+          placeholder="Leave empty to offer it everywhere. One folder per line, e.g. /Users/you/work/acme/*"
+          bind:value={folderRules}
+          autocapitalize="off"
+          autocomplete="off"
+          spellcheck="false"
+          {...{ autocorrect: 'off' }}
+        ></textarea>
+        <button type="button" class="btn btn-ghost shrink-0" onclick={pickFolder}>Choose folder…</button>
+      </div>
+    </fieldset>
 
     {#if error}<p class="rounded-lg border border-fail/40 px-3 py-2 text-[12.5px] text-fail">{error}</p>{/if}
 

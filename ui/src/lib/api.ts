@@ -20,6 +20,9 @@ export type ConnectionStatus =
   | { state: 'disabled' | 'idle' | 'starting' | 'running' | 'needs_auth' }
   | { state: 'error'; message: string };
 
+/** Which client sessions get a connection, by the folder the client works in. */
+export type Scope = { kind: 'everywhere' } | { kind: 'folders'; folders: string[] };
+
 export interface Connection {
   id: string;
   alias: string;
@@ -28,6 +31,7 @@ export interface Connection {
   transport: Transport;
   enabled: boolean;
   idle_timeout_secs: number;
+  scope: Scope;
   created_at: number;
   status: ConnectionStatus;
   tool_count: number;
@@ -41,6 +45,8 @@ export interface ConnectionInput {
   transport: Transport;
   enabled: boolean;
   idle_timeout_secs?: number | null;
+  /** Omitted keeps the current scope; new connections default to everywhere. */
+  scope?: Scope;
   secrets: Record<string, string>;
 }
 
@@ -56,12 +62,12 @@ export interface ToolInfo {
 export type ProfileMode = 'direct' | 'meta';
 export type ToolPolicy = 'allow' | 'approval' | 'hidden';
 
+/** The endpoint clients connect to (`/mcp`). */
 export interface Profile {
   id: string;
   slug: string;
   name: string;
   mode: ProfileMode;
-  connection_ids: string[];
   created_at: number;
   url: string;
   /** Through the tunnel, while it is up. */
@@ -72,7 +78,13 @@ export interface ProfileInput {
   slug: string;
   name: string;
   mode: ProfileMode;
-  connection_ids: string[];
+}
+
+/** A profile URL from before folder routing, still accepted as an alias. */
+export interface LegacyEndpoint {
+  id: string;
+  name: string;
+  url: string;
 }
 
 export interface ProfileTool {
@@ -169,9 +181,9 @@ export const api = {
   connectionTools: (id: string) => invoke<ToolInfo[]>('connection_tools', { id }),
 
   listProfiles: () => invoke<Profile[]>('list_profiles'),
-  createProfile: (input: ProfileInput) => invoke<Profile>('create_profile', { input }),
   updateProfile: (id: string, input: ProfileInput) => invoke<Profile>('update_profile', { id, input }),
-  deleteProfile: (id: string) => invoke<void>('delete_profile', { id }),
+  legacyEndpoints: () => invoke<LegacyEndpoint[]>('legacy_endpoints'),
+  deleteLegacyEndpoint: (id: string) => invoke<void>('delete_legacy_endpoint', { id }),
   profileToken: (id: string) => invoke<string>('profile_token', { id }),
   rotateProfileToken: (id: string) => invoke<string>('rotate_profile_token', { id }),
   profileTools: (id: string) => invoke<ProfileTool[]>('profile_tools', { id }),
@@ -207,10 +219,11 @@ export function toInput(c: Connection): ConnectionInput {
     transport: c.transport,
     enabled: c.enabled,
     idle_timeout_secs: c.idle_timeout_secs,
+    scope: c.scope,
     secrets: {},
   };
 }
 
 export function profileInput(p: Profile): ProfileInput {
-  return { slug: p.slug, name: p.name, mode: p.mode, connection_ids: [...p.connection_ids] };
+  return { slug: p.slug, name: p.name, mode: p.mode };
 }

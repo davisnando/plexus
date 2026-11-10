@@ -1,4 +1,4 @@
-import type { Transport } from './api';
+import type { Scope, Transport } from './api';
 
 export function transportSummary(t: Transport): string {
   if (t.kind === 'stdio') return [t.command, ...t.args].join(' ');
@@ -20,4 +20,10 @@ export function timeAgo(ts: number): string {
 
 export function clock(ts: number): string {
   return new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+export function scopeLabel(scope: Scope): string {
+  if (scope.kind === 'everywhere') return 'everywhere';
+  const n = scope.folders.length;
+  return n ? `${n} folder${n > 1 ? 's' : ''}` : 'no folders';
 }
